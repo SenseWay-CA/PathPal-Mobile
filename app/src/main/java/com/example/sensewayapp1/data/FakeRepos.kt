@@ -34,7 +34,7 @@ class FakeDeviceRepo @Inject constructor() : DeviceRepository {
     private val _contacts = MutableStateFlow(
         listOf(
             Contact("1","Sarah Johnson","+1 555-0101","Daughter"),
-            Contact("2","Dr. Michael Chen","+1 555-0123","Physician")
+            Contact("2","Dr. Miqdad Valji","+1 555-0123","Physician")
         )
     )
     private val _fences = MutableStateFlow(

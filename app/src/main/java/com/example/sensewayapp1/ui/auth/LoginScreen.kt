@@ -2,6 +2,7 @@ package com.example.sensewayapp1.ui.auth
 
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateColor
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -9,13 +10,21 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -30,13 +39,25 @@ fun LoginScreen(
 ) {
     val ui = vm.ui.collectAsState().value
 
-    // Logo vibration animation
+    // Infinite transition for rotation + color
     val infiniteTransition = rememberInfiniteTransition()
+
+    // Logo vibration animation
     val rotation by infiniteTransition.animateFloat(
         initialValue = -3f,
         targetValue = 3f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 80, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+
+    // Logo tint color animation (red <-> blue)
+    val tintColor by infiniteTransition.animateColor(
+        initialValue = Color.Red,
+        targetValue = Color.Blue,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
         )
     )
@@ -59,7 +80,8 @@ fun LoginScreen(
                 contentDescription = "SenseWay logo",
                 modifier = Modifier
                     .size(313.dp)
-                    .rotate(rotation)
+                    .rotate(rotation),
+                colorFilter = ColorFilter.tint(tintColor)
             )
 
             Spacer(Modifier.height(11.dp))
