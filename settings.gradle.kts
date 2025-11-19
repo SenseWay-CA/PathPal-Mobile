@@ -1,26 +1,24 @@
 pluginManagement {
-    repositories { gradlePluginPortal(); google(); mavenCentral() }
+    repositories {
+        google {
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
 }
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-    repositories { google(); mavenCentral() }
+    repositories {
+        google()
+        mavenCentral()
+    }
 }
 
-
-include(
-    ":app",
-    ":core:designsystem",
-    ":core:model",
-    ":core:data",
-    ":core:network",
-    ":core:ble",
-    ":core:common",
-    ":feature:auth",
-    ":feature:home",
-    ":feature:console",
-    ":feature:settings",
-)
-
-rootProject.name = "SenseWayTApp1"
+rootProject.name = "PathPalDemo"
 include(":app")
  

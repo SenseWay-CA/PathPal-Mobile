@@ -1,4 +1,4 @@
-package com.example.sensewayapp1
+package ca.senseway.pathpaldemo
 
 import org.junit.Test
 
