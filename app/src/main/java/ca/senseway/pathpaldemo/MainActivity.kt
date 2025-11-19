@@ -55,6 +55,15 @@ import kotlinx.coroutines.delay
 import retrofit2.converter.gson.GsonConverterFactory
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.viewinterop.AndroidView
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,6 +71,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             SenseWayAppTheme {
                 SenseWayApp()
+
+
             }
         }
     }
@@ -90,7 +101,13 @@ class DashboardViewModel : ViewModel() {
     var heartRate by mutableStateOf(0)
         private set
 
-    private val userId = "c1987b12-3ffe-432a-ac13-4b06264409ed"
+    var latitude by mutableStateOf(0.0)
+        private set
+
+    var longitude by mutableStateOf(0.0)
+        private set
+
+    val userId = "c1987b12-3ffe-432a-ac13-4b06264409ed"
 
     init {
         startPolling()
@@ -103,6 +120,9 @@ class DashboardViewModel : ViewModel() {
                     val status = ApiClient.api.getStatus(userId)
                     battery = status.battery
                     heartRate = status.heart_rate ?: 0
+
+                    status.latitude?.let { latitude = it }
+                    status.longitude?.let { longitude = it }
                 } catch (e: Exception) {
                     Log.e("DashboardVM", "Failed to fetch status", e)
                 }
@@ -123,17 +143,80 @@ interface SenseWayApi {
 // Response data class
 data class StatusResponse(
     val battery: Int,
-    val heart_rate: Int?
-    
+    val heart_rate: Int?,
+    val latitude: Double?,
+    val longitude: Double?
+
 )
 
+data class LocationResponse(
+    val latitude: Double,
+    val longitude: Double
+)
+
+
+//Map
+
+@Composable
+fun LiveMap(
+    latitude: Double,
+    longitude: Double
+) {
+    val context = LocalContext.current
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(200.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = DarkSurface,
+        tonalElevation = 6.dp
+    ) {
+        if (latitude != 0.0 && longitude != 0.0) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    Configuration.getInstance().load(ctx, ctx.getSharedPreferences("osmdroid", 0))
+                    MapView(ctx).apply {
+                        setTileSource(TileSourceFactory.MAPNIK)
+                        setMultiTouchControls(true)
+                        controller.setZoom(15.0)
+                        controller.setCenter(GeoPoint(latitude, longitude))
+
+                        // Add marker
+                        val marker = Marker(this)
+                        marker.position = GeoPoint(latitude, longitude)
+                        marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        marker.title = "Current Location"
+                        overlays.add(marker)
+                    }
+                },
+                update = { mapView ->
+                    mapView.controller.setCenter(GeoPoint(latitude, longitude))
+                    if (mapView.overlays.isNotEmpty()) {
+                        val marker = mapView.overlays[0] as? Marker
+                        marker?.position = GeoPoint(latitude, longitude)
+                    }
+                }
+            )
+        } else {
+            // Fallback text if location not available yet
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Fetching location...", color = Color(0xFF9CA3AF))
+            }
+        }
+    }
+}
 
 
 
 /* ---------- Simple Dark Theme ---------- */
 
-private val DarkBackground = Color(0xFF020617)  // deep navy
-private val DarkSurface = Color(0xFF0B1220)     // card background
+private val DarkBackground = Color(0xFF29292C)  // deep navy
+private val DarkSurface = Color(0xFF222223)     // card background
 private val Accent = Color(0xFF22C55E)          // green
 private val AccentBlue = Color(0xFF38BDF8)
 
@@ -233,7 +316,7 @@ fun DashboardScreen(viewModel: DashboardViewModel = viewModel()) {
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text("Welcome", fontSize = 14.sp, color = Color(0xFF9CA3AF))
-                Text("User_ID", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text(viewModel.userId, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             }
             AssistChip(
                 onClick = { /* TODO: user profile / settings */ },
@@ -286,10 +369,9 @@ fun DashboardScreen(viewModel: DashboardViewModel = viewModel()) {
         }
 
         // Map preview
-        BigBlockCard(
-            title = "Map",
-            description = "Current route overview",
-            icon = { androidx.compose.material3.Icon(Icons.Filled.Map, null) }
+        LiveMap(
+            latitude = viewModel.latitude,
+            longitude = viewModel.longitude
         )
 
         // Events / alerts
@@ -449,7 +531,7 @@ data class BackendStat(
 )
 
 @Composable
-fun BackendStatsScreen() {
+fun BackendStatsScreen(viewModel: DashboardViewModel =viewModel()) {
     // Replace with your live sensor data later.
     val sampleStats = listOf(
         BackendStat(
@@ -464,12 +546,12 @@ fun BackendStatsScreen() {
         ),
         BackendStat(
             "Battery Percentage",
-            "25/100",
+            "${viewModel.battery}/100",
             "Battery Health 100%"
         ),
         BackendStat(
             "Current Location",
-            "48.4284° N, 123.3656° W",
+            "${String.format("%.4f", viewModel.latitude)}° N, ${String.format("%.4f", viewModel.longitude)}° W",
             "Last GPS fix – accuracy 6 m."
         ),
         BackendStat(
@@ -484,7 +566,7 @@ fun BackendStatsScreen() {
         ),
         BackendStat(
             "Heart Rate (sensor)",
-            "76 bpm",
+            "${viewModel.heartRate} bpm",
             "Most recent reading from HR sensor."
         )
     )
