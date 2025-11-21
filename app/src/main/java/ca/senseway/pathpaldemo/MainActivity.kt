@@ -2,7 +2,10 @@
 
 package ca.senseway.pathpaldemo
 
+import android.bluetooth.BluetoothManager
+import android.content.Context
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -12,58 +15,34 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BarChart
-import androidx.compose.material.icons.filled.BatteryFull
-import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-
-
-/* ADded extra imports */
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.launch
-import retrofit2.Retrofit
-import retrofit2.http.GET
-import retrofit2.http.Query
-import android.util.Log
 import kotlinx.coroutines.delay
-import retrofit2.converter.gson.GsonConverterFactory
-import androidx.lifecycle.ViewModelProvider
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.launch
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.GET
+import retrofit2.http.Query
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,14 +50,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             SenseWayAppTheme {
                 SenseWayApp()
-
-
             }
         }
     }
 }
-
-
 
 object ApiClient {
     private const val BASE_URL = "https://api.senseway.ca/"
@@ -92,9 +67,19 @@ object ApiClient {
     }
 }
 
+// ---------------- VIEW MODEL FACTORY ----------------
+// This allows us to pass the 'Context' into the ViewModel
+class DashboardViewModelFactory(private val context: Context) : ViewModelProvider.Factory {
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(DashboardViewModel::class.java)) {
+            @Suppress("UNCHECKED_CAST")
+            return DashboardViewModel(context) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class")
+    }
+}
 
-
-class DashboardViewModel : ViewModel() {
+class DashboardViewModel(context: Context) : ViewModel() {
     var battery by mutableStateOf(0)
         private set
 
@@ -107,10 +92,44 @@ class DashboardViewModel : ViewModel() {
     var longitude by mutableStateOf(0.0)
         private set
 
+    var connectionState by mutableStateOf("Disconnected")
+        private set
+
     val userId = "c1987b12-3ffe-432a-ac13-4b06264409ed"
 
+    // Bluetooth Service Initialization
+    private val btAdapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    private val bluetoothService = BluetoothService(btAdapter)
+
+    // *** REPLACE THIS WITH YOUR PI'S ACTUAL MAC ADDRESS ***
+    private val PI_MAC_ADDRESS = "B8:27:EB:7D:E7:FE"
+
     init {
+        // 1. Start listening to Bluetooth data
+        viewModelScope.launch {
+            bluetoothService.sensorData.collect { data ->
+                if (data.bpm > 0) heartRate = data.bpm
+                // Map other sensor fields if needed:
+                // val distance = data.dist_cm
+            }
+        }
+
+        // 2. Start listening to Connection Status
+        viewModelScope.launch {
+            bluetoothService.connectionStatus.collect { status ->
+                connectionState = status
+            }
+        }
+
+        // 3. Attempt connection
+        connectBluetooth()
+
+        // 4. Start Web API Polling (for GPS/Battery backup)
         startPolling()
+    }
+
+    fun connectBluetooth() {
+        bluetoothService.connectToPi(PI_MAC_ADDRESS)
     }
 
     private fun startPolling() {
@@ -119,20 +138,22 @@ class DashboardViewModel : ViewModel() {
                 try {
                     val status = ApiClient.api.getStatus(userId)
                     battery = status.battery
-                    heartRate = status.heart_rate ?: 0
+                    // Only overwrite HR from web if we aren't getting it from BT?
+                    // Or just let web data be a backup.
+                    if (heartRate == 0) {
+                        heartRate = status.heart_rate ?: 0
+                    }
 
                     status.latitude?.let { latitude = it }
                     status.longitude?.let { longitude = it }
                 } catch (e: Exception) {
                     Log.e("DashboardVM", "Failed to fetch status", e)
                 }
-                delay(3000) // poll every 3 seconds like web app
+                delay(3000)
             }
         }
     }
 }
-
-
 
 // Retrofit interface
 interface SenseWayApi {
@@ -140,30 +161,17 @@ interface SenseWayApi {
     suspend fun getStatus(@Query("user_id") userId: String): StatusResponse
 }
 
-// Response data class
 data class StatusResponse(
     val battery: Int,
     val heart_rate: Int?,
     val latitude: Double?,
     val longitude: Double?
-
 )
 
-data class LocationResponse(
-    val latitude: Double,
-    val longitude: Double
-)
-
-
-//Map
+// ---------------- MAP COMPONENT ----------------
 
 @Composable
-fun LiveMap(
-    latitude: Double,
-    longitude: Double
-) {
-    val context = LocalContext.current
-
+fun LiveMap(latitude: Double, longitude: Double) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -183,7 +191,6 @@ fun LiveMap(
                         controller.setZoom(15.0)
                         controller.setCenter(GeoPoint(latitude, longitude))
 
-                        // Add marker
                         val marker = Marker(this)
                         marker.position = GeoPoint(latitude, longitude)
                         marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
@@ -200,7 +207,6 @@ fun LiveMap(
                 }
             )
         } else {
-            // Fallback text if location not available yet
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -211,13 +217,11 @@ fun LiveMap(
     }
 }
 
+/* ---------- THEME & NAVIGATION ---------- */
 
-
-/* ---------- Simple Dark Theme ---------- */
-
-private val DarkBackground = Color(0xFF29292C)  // deep navy
-private val DarkSurface = Color(0xFF222223)     // card background
-private val Accent = Color(0xFF22C55E)          // green
+private val DarkBackground = Color(0xFF29292C)
+private val DarkSurface = Color(0xFF222223)
+private val Accent = Color(0xFF22C55E)
 private val AccentBlue = Color(0xFF38BDF8)
 
 @Composable
@@ -239,11 +243,9 @@ fun SenseWayAppTheme(content: @Composable () -> Unit) {
     )
 }
 
-/* ---------- Navigation ---------- */
-
 sealed class SenseWayScreen(val label: String, val icon: @Composable () -> Unit) {
-    object Dashboard : SenseWayScreen("Dashboard", { androidx.compose.material3.Icon(Icons.Filled.Home, null) })
-    object BackendStats : SenseWayScreen("Backend", { androidx.compose.material3.Icon(Icons.Filled.BarChart, null) })
+    object Dashboard : SenseWayScreen("Dashboard", { Icon(Icons.Filled.Home, null) })
+    object BackendStats : SenseWayScreen("Backend", { Icon(Icons.Filled.BarChart, null) })
 }
 
 @Composable
@@ -256,9 +258,7 @@ fun SenseWayApp() {
             .background(DarkBackground),
         containerColor = DarkBackground,
         bottomBar = {
-            NavigationBar(
-                containerColor = Color(0xFF020617)
-            ) {
+            NavigationBar(containerColor = Color(0xFF020617)) {
                 listOf(SenseWayScreen.Dashboard, SenseWayScreen.BackendStats).forEach { screen ->
                     NavigationBarItem(
                         selected = currentScreen::class == screen::class,
@@ -284,18 +284,22 @@ fun SenseWayApp() {
     }
 }
 
-/* ---------- Dashboard Screen ---------- */
+/* ---------- DASHBOARD SCREEN ---------- */
 
 @Composable
-fun DashboardScreen(viewModel: DashboardViewModel = viewModel()) {
+fun DashboardScreen(
+    // We use the Factory here to inject the Context
+    viewModel: DashboardViewModel = viewModel(
+        factory = DashboardViewModelFactory(LocalContext.current.applicationContext)
+    )
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-
-        // Top bar: logo + welcome
+        // Header
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -305,9 +309,7 @@ fun DashboardScreen(viewModel: DashboardViewModel = viewModel()) {
                 modifier = Modifier
                     .size(44.dp)
                     .background(
-                        brush = Brush.linearGradient(
-                            listOf(Accent, AccentBlue)
-                        ),
+                        brush = Brush.linearGradient(listOf(Accent, AccentBlue)),
                         shape = RoundedCornerShape(14.dp)
                     ),
                 contentAlignment = Alignment.Center
@@ -319,37 +321,30 @@ fun DashboardScreen(viewModel: DashboardViewModel = viewModel()) {
                 Text(viewModel.userId, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             }
             AssistChip(
-                onClick = { /* TODO: user profile / settings */ },
+                onClick = { },
                 label = { Text("Status • Online") },
                 leadingIcon = {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .background(Accent, CircleShape)
-                    )
+                    Box(modifier = Modifier.size(8.dp).background(Accent, CircleShape))
                 },
-                colors = AssistChipDefaults.assistChipColors(
-                    containerColor = Color(0xFF111827)
-                )
+                colors = AssistChipDefaults.assistChipColors(containerColor = Color(0xFF111827))
             )
         }
 
-        // Bluetooth Status card
+        // Bluetooth Status Card
         LargeStatusCard(
             title = "Bluetooth Status",
-            subtitle = "Connected to SenseWay cane",
+            subtitle = viewModel.connectionState,
             icon = {
-                androidx.compose.material3.Icon(
+                Icon(
                     imageVector = Icons.Filled.Bluetooth,
                     contentDescription = null,
-                    tint = AccentBlue
+                    tint = if (viewModel.connectionState == "Connected") Color.Green else AccentBlue
                 )
             },
             accentColor = AccentBlue
         )
 
-
-        // Battery + Heart rate row
+        // Battery + Heart Rate
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -358,27 +353,24 @@ fun DashboardScreen(viewModel: DashboardViewModel = viewModel()) {
                 modifier = Modifier.weight(1f),
                 title = "Battery",
                 value = "${viewModel.battery}%",
-                icon = { androidx.compose.material3.Icon(Icons.Filled.BatteryFull, null) }
+                icon = { Icon(Icons.Filled.BatteryFull, null) }
             )
             SmallInfoCard(
                 modifier = Modifier.weight(1f),
                 title = "HRate",
                 value = "${viewModel.heartRate} bpm",
-                icon = { androidx.compose.material3.Icon(Icons.Filled.Favorite, null) }
+                icon = { Icon(Icons.Filled.Favorite, null) }
             )
         }
 
-        // Map preview
-        LiveMap(
-            latitude = viewModel.latitude,
-            longitude = viewModel.longitude
-        )
+        // Map
+        LiveMap(latitude = viewModel.latitude, longitude = viewModel.longitude)
 
-        // Events / alerts
+        // Events
         BigBlockCard(
             title = "Events",
             description = "No recent events. All clear ✨",
-            icon = { androidx.compose.material3.Icon(Icons.Filled.Notifications, null) }
+            icon = { Icon(Icons.Filled.Notifications, null) }
         )
     }
 }
@@ -408,31 +400,20 @@ private fun LargeStatusCard(
             Box(
                 modifier = Modifier
                     .size(56.dp)
-                    .background(
-                        accentColor.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(18.dp)
-                    ),
+                    .background(accentColor.copy(alpha = 0.15f), shape = RoundedCornerShape(18.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                // Just draw the icon; tint is handled by the caller
                 icon()
             }
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(title, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(subtitle, fontSize = 13.sp, color = Color(0xFF9CA3AF))
             }
-            androidx.compose.material3.Icon(
-                imageVector = Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = Color(0xFF4B5563)
-            )
+            Icon(Icons.Filled.ChevronRight, null, tint = Color(0xFF4B5563))
         }
     }
 }
-
 
 @Composable
 private fun SmallInfoCard(
@@ -457,10 +438,7 @@ private fun SmallInfoCard(
                 Box(
                     modifier = Modifier
                         .size(30.dp)
-                        .background(
-                            Color(0xFF111827),
-                            shape = RoundedCornerShape(10.dp)
-                        ),
+                        .background(Color(0xFF111827), shape = RoundedCornerShape(10.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     icon()
@@ -468,11 +446,7 @@ private fun SmallInfoCard(
                 Spacer(Modifier.width(8.dp))
                 Text(title, fontSize = 14.sp, color = Color(0xFF9CA3AF))
             }
-            Text(
-                value,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Text(value, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -497,10 +471,7 @@ private fun BigBlockCard(
                 .padding(18.dp),
             verticalAlignment = Alignment.Top
         ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(title, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Text(
                     description,
@@ -511,9 +482,7 @@ private fun BigBlockCard(
                 )
             }
             Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(Color(0xFF111827), CircleShape),
+                modifier = Modifier.size(40.dp).background(Color(0xFF111827), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 icon()
@@ -522,79 +491,32 @@ private fun BigBlockCard(
     }
 }
 
-/* ---------- Backend Statistics Screen ---------- */
+/* ---------- BACKEND STATS SCREEN ---------- */
 
-data class BackendStat(
-    val label: String,
-    val value: String,
-    val description: String
-)
+data class BackendStat(val label: String, val value: String, val description: String)
 
 @Composable
-fun BackendStatsScreen(viewModel: DashboardViewModel =viewModel()) {
-    // Replace with your live sensor data later.
+fun BackendStatsScreen(
+    viewModel: DashboardViewModel = viewModel(
+        factory = DashboardViewModelFactory(LocalContext.current.applicationContext)
+    )
+) {
     val sampleStats = listOf(
-        BackendStat(
-            "Accelerometer",
-            "x: 0.02  y: -0.15  z: 9.81 m/s²",
-            "Linear acceleration on all three axes."
-        ),
-        BackendStat(
-            "Gyroscope",
-            "x: 0.01  y: 0.03  z: 0.00 rad/s",
-            "Angular velocity (device rotation)."
-        ),
-        BackendStat(
-            "Battery Percentage",
-            "${viewModel.battery}/100",
-            "Battery Health 100%"
-        ),
-        BackendStat(
-            "Current Location",
-            "${String.format("%.4f", viewModel.latitude)}° N, ${String.format("%.4f", viewModel.longitude)}° W",
-            "Last GPS fix – accuracy 6 m."
-        ),
-        BackendStat(
-            "Altitude",
-            "23.4 m",
-            "Height above sea level."
-        ),
-        BackendStat(
-            "Bluetooth RSSI",
-            "-62 dBm",
-            "Signal strength from cane."
-        ),
-        BackendStat(
-            "Heart Rate (sensor)",
-            "${viewModel.heartRate} bpm",
-            "Most recent reading from HR sensor."
-        )
+        BackendStat("Battery Percentage", "${viewModel.battery}/100", "Battery Health 100%"),
+        BackendStat("Current Location", "${String.format("%.4f", viewModel.latitude)}° N, ${String.format("%.4f", viewModel.longitude)}° W", "Last GPS fix"),
+        BackendStat("Bluetooth Status", viewModel.connectionState, "Live connection status"),
+        BackendStat("Heart Rate", "${viewModel.heartRate} bpm", "Sensor reading")
     )
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(DarkBackground)
-    ) {
-        // Top bar
+    Column(modifier = Modifier.fillMaxSize().background(DarkBackground)) {
         TopAppBar(
             title = {
                 Column {
                     Text("Backend Statistics", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Live sensor & connection values",
-                        fontSize = 12.sp,
-                        color = Color(0xFF9CA3AF)
-                    )
+                    Text("Live sensor & connection values", fontSize = 12.sp, color = Color(0xFF9CA3AF))
                 }
             },
-            navigationIcon = {
-                androidx.compose.material3.Icon(
-                    Icons.Filled.BarChart,
-                    contentDescription = null,
-                    modifier = Modifier.padding(start = 12.dp)
-                )
-            },
+            navigationIcon = { Icon(Icons.Filled.BarChart, null, modifier = Modifier.padding(start = 12.dp)) },
             colors = TopAppBarDefaults.topAppBarColors(
                 containerColor = DarkBackground,
                 titleContentColor = MaterialTheme.colorScheme.onBackground,
@@ -603,24 +525,11 @@ fun BackendStatsScreen(viewModel: DashboardViewModel =viewModel()) {
         )
 
         LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(sampleStats) { stat ->
                 BackendStatCard(stat)
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    "Tip: you can hook these fields directly to your sensor " +
-                            "flows / ViewModel for real-time updates.",
-                    fontSize = 11.sp,
-                    color = Color(0xFF6B7280),
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
-                )
             }
         }
     }
@@ -629,54 +538,28 @@ fun BackendStatsScreen(viewModel: DashboardViewModel =viewModel()) {
 @Composable
 private fun BackendStatCard(stat: BackendStat) {
     Surface(
-        modifier = Modifier
-            .fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
         color = DarkSurface,
         tonalElevation = 4.dp
     ) {
-        Column(
-            modifier = Modifier
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    stat.label,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Text(stat.label, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Box(
                     modifier = Modifier
-                        .background(
-                            Accent.copy(alpha = 0.12f),
-                            shape = RoundedCornerShape(999.dp)
-                        )
+                        .background(Accent.copy(alpha = 0.12f), shape = RoundedCornerShape(999.dp))
                         .padding(horizontal = 10.dp, vertical = 4.dp)
                 ) {
-                    Text(
-                        "Live",
-                        fontSize = 11.sp,
-                        color = Accent,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Text("Live", fontSize = 11.sp, color = Accent, fontWeight = FontWeight.Medium)
                 }
             }
-            Text(
-                stat.value,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = AccentBlue
-            )
-            Text(
-                stat.description,
-                fontSize = 12.sp,
-                color = Color(0xFF9CA3AF)
-            )
+            Text(stat.value, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = AccentBlue)
+            Text(stat.description, fontSize = 12.sp, color = Color(0xFF9CA3AF))
         }
     }
 }
