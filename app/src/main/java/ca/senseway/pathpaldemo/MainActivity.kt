@@ -2,12 +2,17 @@
 
 package ca.senseway.pathpaldemo
 
+import android.Manifest
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Looper
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,10 +33,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewModelScope
+import com.google.android.gms.location.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.osmdroid.config.Configuration
@@ -68,7 +75,6 @@ object ApiClient {
 }
 
 // ---------------- VIEW MODEL FACTORY ----------------
-// This allows us to pass the 'Context' into the ViewModel
 class DashboardViewModelFactory(private val context: Context) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(DashboardViewModel::class.java)) {
@@ -79,7 +85,7 @@ class DashboardViewModelFactory(private val context: Context) : ViewModelProvide
     }
 }
 
-class DashboardViewModel(context: Context) : ViewModel() {
+class DashboardViewModel(private val context: Context) : ViewModel() {
     var battery by mutableStateOf(0)
         private set
 
@@ -95,11 +101,33 @@ class DashboardViewModel(context: Context) : ViewModel() {
     var connectionState by mutableStateOf("Disconnected")
         private set
 
+    // --- SENSOR DATA ---
+    var accelerometer by mutableStateOf(listOf(0.0, 0.0, 0.0))
+        private set
+
+    var gyroscope by mutableStateOf(listOf(0.0, 0.0, 0.0))
+        private set
+
+    var lidarDistance by mutableStateOf(0.0)
+        private set
+    // -----------------------
+
     val userId = "c1987b12-3ffe-432a-ac13-4b06264409ed"
 
     // Bluetooth Service Initialization
     private val btAdapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
     private val bluetoothService = BluetoothService(btAdapter)
+
+    // GPS Initialization
+    private val fusedLocationClient: FusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(context)
+    private val locationCallback = object : LocationCallback() {
+        override fun onLocationResult(locationResult: LocationResult) {
+            for (location in locationResult.locations) {
+                latitude = location.latitude
+                longitude = location.longitude
+            }
+        }
+    }
 
     // *** REPLACE THIS WITH YOUR PI'S ACTUAL MAC ADDRESS ***
     private val PI_MAC_ADDRESS = "B8:27:EB:7D:E7:FE"
@@ -109,8 +137,11 @@ class DashboardViewModel(context: Context) : ViewModel() {
         viewModelScope.launch {
             bluetoothService.sensorData.collect { data ->
                 if (data.bpm > 0) heartRate = data.bpm
-                // Map other sensor fields if needed:
-                // val distance = data.dist_cm
+
+                // Update new sensor states
+                accelerometer = data.accel
+                gyroscope = data.gyro
+                lidarDistance = data.dist_cm
             }
         }
 
@@ -124,12 +155,32 @@ class DashboardViewModel(context: Context) : ViewModel() {
         // 3. Attempt connection
         connectBluetooth()
 
-        // 4. Start Web API Polling (for GPS/Battery backup)
+        // 4. Start Server Polling (Only for Battery now)
         startPolling()
     }
 
     fun connectBluetooth() {
         bluetoothService.connectToPi(PI_MAC_ADDRESS)
+    }
+
+    fun startLocationUpdates() {
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
+            .setWaitForAccurateLocation(false)
+            .setMinUpdateIntervalMillis(2000)
+            .build()
+
+        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
     }
 
     private fun startPolling() {
@@ -138,20 +189,21 @@ class DashboardViewModel(context: Context) : ViewModel() {
                 try {
                     val status = ApiClient.api.getStatus(userId)
                     battery = status.battery
-                    // Only overwrite HR from web if we aren't getting it from BT?
-                    // Or just let web data be a backup.
-                    if (heartRate == 0) {
-                        heartRate = status.heart_rate ?: 0
-                    }
 
-                    status.latitude?.let { latitude = it }
-                    status.longitude?.let { longitude = it }
+                    // We no longer fetch lat/long from server
+                    // status.latitude?.let { latitude = it }
+                    // status.longitude?.let { longitude = it }
                 } catch (e: Exception) {
                     Log.e("DashboardVM", "Failed to fetch status", e)
                 }
                 delay(3000)
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        fusedLocationClient.removeLocationUpdates(locationCallback)
     }
 }
 
@@ -188,22 +240,24 @@ fun LiveMap(latitude: Double, longitude: Double) {
                     MapView(ctx).apply {
                         setTileSource(TileSourceFactory.MAPNIK)
                         setMultiTouchControls(true)
-                        controller.setZoom(15.0)
+                        controller.setZoom(18.0) // Zoomed in closer for GPS tracking
                         controller.setCenter(GeoPoint(latitude, longitude))
 
                         val marker = Marker(this)
                         marker.position = GeoPoint(latitude, longitude)
                         marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                         marker.title = "Current Location"
+                        marker.icon = ctx.getDrawable(org.osmdroid.library.R.drawable.person) // Optional: specific icon
                         overlays.add(marker)
                     }
                 },
                 update = { mapView ->
-                    mapView.controller.setCenter(GeoPoint(latitude, longitude))
+                    mapView.controller.animateTo(GeoPoint(latitude, longitude))
                     if (mapView.overlays.isNotEmpty()) {
                         val marker = mapView.overlays[0] as? Marker
                         marker?.position = GeoPoint(latitude, longitude)
                     }
+                    mapView.invalidate() // Force refresh
                 }
             )
         } else {
@@ -211,7 +265,7 @@ fun LiveMap(latitude: Double, longitude: Double) {
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                Text("Fetching location...", color = Color(0xFF9CA3AF))
+                Text("Waiting for GPS...", color = Color(0xFF9CA3AF))
             }
         }
     }
@@ -288,11 +342,34 @@ fun SenseWayApp() {
 
 @Composable
 fun DashboardScreen(
-    // We use the Factory here to inject the Context
     viewModel: DashboardViewModel = viewModel(
         factory = DashboardViewModelFactory(LocalContext.current.applicationContext)
     )
 ) {
+    // --- PERMISSION HANDLING ---
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions(),
+        onResult = { permissions ->
+            if (permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+            ) {
+                viewModel.startLocationUpdates()
+            }
+        }
+    )
+
+    LaunchedEffect(Unit) {
+        permissionLauncher.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            )
+        )
+        // Attempt start in case already granted
+        viewModel.startLocationUpdates()
+    }
+    // --------------------------
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -318,7 +395,7 @@ fun DashboardScreen(
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text("Welcome", fontSize = 14.sp, color = Color(0xFF9CA3AF))
-                Text(viewModel.userId, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("John Doe", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             }
             AssistChip(
                 onClick = { },
@@ -501,11 +578,39 @@ fun BackendStatsScreen(
         factory = DashboardViewModelFactory(LocalContext.current.applicationContext)
     )
 ) {
+    // Helper to format list of doubles
+    fun formatVector(vec: List<Double>): String {
+        return if (vec.size >= 3) {
+            "x: %.2f  y: %.2f  z: %.2f".format(vec[0], vec[1], vec[2])
+        } else {
+            "Loading..."
+        }
+    }
+
     val sampleStats = listOf(
-        BackendStat("Battery Percentage", "${viewModel.battery}/100", "Battery Health 100%"),
-        BackendStat("Current Location", "${String.format("%.4f", viewModel.latitude)}° N, ${String.format("%.4f", viewModel.longitude)}° W", "Last GPS fix"),
         BackendStat("Bluetooth Status", viewModel.connectionState, "Live connection status"),
-        BackendStat("Heart Rate", "${viewModel.heartRate} bpm", "Sensor reading")
+        BackendStat("Heart Rate", "${viewModel.heartRate} bpm", "Sensor reading"),
+
+        // --- NEW CARDS ---
+        BackendStat(
+            "Accelerometer",
+            formatVector(viewModel.accelerometer),
+            "Linear acceleration (m/s²)"
+        ),
+        BackendStat(
+            "Gyroscope",
+            formatVector(viewModel.gyroscope),
+            "Angular velocity (rad/s)"
+        ),
+        BackendStat(
+            "LiDAR Distance",
+            "%.1f cm".format(viewModel.lidarDistance),
+            "Obstacle distance"
+        ),
+        // -----------------
+
+        BackendStat("Battery Percentage", "${viewModel.battery}%", "Battery Health 100%"),
+        BackendStat("Current Location", "${String.format("%.4f", viewModel.latitude)}° N, ${String.format("%.4f", viewModel.longitude)}° W", "GPS")
     )
 
     Column(modifier = Modifier.fillMaxSize().background(DarkBackground)) {
