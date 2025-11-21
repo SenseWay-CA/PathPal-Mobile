@@ -39,6 +39,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewModelScope
 import com.google.android.gms.location.*
+import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.osmdroid.config.Configuration
@@ -48,8 +49,8 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
-import retrofit2.http.GET
-import retrofit2.http.Query
+import retrofit2.http.Body
+import retrofit2.http.POST
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,7 +87,7 @@ class DashboardViewModelFactory(private val context: Context) : ViewModelProvide
 }
 
 class DashboardViewModel(private val context: Context) : ViewModel() {
-    var battery by mutableStateOf(0)
+    var battery by mutableStateOf(100) // Default to 100 as requested
         private set
 
     var heartRate by mutableStateOf(0)
@@ -155,8 +156,8 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
         // 3. Attempt connection
         connectBluetooth()
 
-        // 4. Start Server Polling (Only for Battery now)
-        startPolling()
+        // 4. Start Uploading Data to Server
+        startUploading()
     }
 
     fun connectBluetooth() {
@@ -183,20 +184,28 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
         fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
     }
 
-    private fun startPolling() {
+    private fun startUploading() {
         viewModelScope.launch {
             while (true) {
-                try {
-                    val status = ApiClient.api.getStatus(userId)
-                    battery = status.battery
+                // Only upload if we have valid GPS coordinates
+                if (latitude != 0.0 && longitude != 0.0) {
+                    try {
+                        val request = StatusUploadRequest(
+                            userId = userId,
+                            latitude = latitude,
+                            longitude = longitude,
+                            battery = 100, // Hardcoded as requested
+                            heartRate = heartRate
+                        )
 
-                    // We no longer fetch lat/long from server
-                    // status.latitude?.let { latitude = it }
-                    // status.longitude?.let { longitude = it }
-                } catch (e: Exception) {
-                    Log.e("DashboardVM", "Failed to fetch status", e)
+                        ApiClient.api.postStatus(request)
+                        // Log.d("Upload", "Status uploaded successfully")
+
+                    } catch (e: Exception) {
+                        Log.e("DashboardVM", "Failed to upload status", e)
+                    }
                 }
-                delay(3000)
+                delay(3000) // Upload every 3 seconds
             }
         }
     }
@@ -207,17 +216,20 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
     }
 }
 
-// Retrofit interface
+// ---------------- RETROFIT INTERFACE ----------------
+
 interface SenseWayApi {
-    @GET("status")
-    suspend fun getStatus(@Query("user_id") userId: String): StatusResponse
+    @POST("status")
+    suspend fun postStatus(@Body request: StatusUploadRequest): retrofit2.Response<Map<String, String>>
 }
 
-data class StatusResponse(
+// Data class matching the Go backend 'StatusRequest' struct
+data class StatusUploadRequest(
+    @SerializedName("user_id") val userId: String,
+    val longitude: Double,
+    val latitude: Double,
     val battery: Int,
-    val heart_rate: Int?,
-    val latitude: Double?,
-    val longitude: Double?
+    @SerializedName("heart_rate") val heartRate: Int
 )
 
 // ---------------- MAP COMPONENT ----------------
