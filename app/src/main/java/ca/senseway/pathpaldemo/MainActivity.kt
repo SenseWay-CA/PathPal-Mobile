@@ -15,8 +15,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn // Added back
+import androidx.compose.foundation.lazy.items      // Added back
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -50,7 +52,9 @@ import org.osmdroid.views.overlay.Marker
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.GET
 import retrofit2.http.POST
+import retrofit2.http.Query
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -87,7 +91,7 @@ class DashboardViewModelFactory(private val context: Context) : ViewModelProvide
 }
 
 class DashboardViewModel(private val context: Context) : ViewModel() {
-    var battery by mutableStateOf(100) // Default to 100 as requested
+    var battery by mutableStateOf(100)
         private set
 
     var heartRate by mutableStateOf(0)
@@ -110,6 +114,10 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
         private set
 
     var lidarDistance by mutableStateOf(0.0)
+        private set
+
+    // --- EVENTS DATA ---
+    var events by mutableStateOf<List<SensorEvent>>(emptyList())
         private set
     // -----------------------
 
@@ -158,6 +166,27 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
 
         // 4. Start Uploading Data to Server
         startUploading()
+
+        // 5. Fetch recent events
+        fetchRecentEvents()
+    }
+
+    fun fetchRecentEvents() {
+        viewModelScope.launch {
+            try {
+                // Fetch last 5 events
+                val response = ApiClient.api.getEvents(userId, 5)
+                if (response.isSuccessful) {
+                    response.body()?.let { fetchedEvents ->
+                        events = fetchedEvents
+                    }
+                } else {
+                    Log.e("DashboardVM", "Error fetching events: ${response.code()}")
+                }
+            } catch (e: Exception) {
+                Log.e("DashboardVM", "Failed to fetch events", e)
+            }
+        }
     }
 
     fun connectBluetooth() {
@@ -199,8 +228,6 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
                         )
 
                         ApiClient.api.postStatus(request)
-                        // Log.d("Upload", "Status uploaded successfully")
-
                     } catch (e: Exception) {
                         Log.e("DashboardVM", "Failed to upload status", e)
                     }
@@ -221,15 +248,30 @@ class DashboardViewModel(private val context: Context) : ViewModel() {
 interface SenseWayApi {
     @POST("status")
     suspend fun postStatus(@Body request: StatusUploadRequest): retrofit2.Response<Map<String, String>>
+
+    @GET("events")
+    suspend fun getEvents(
+        @Query("user_id") userId: String,
+        @Query("quantity") quantity: Int
+    ): retrofit2.Response<List<SensorEvent>>
 }
 
-// Data class matching the Go backend 'StatusRequest' struct
+// Data Models
 data class StatusUploadRequest(
     @SerializedName("user_id") val userId: String,
     val longitude: Double,
     val latitude: Double,
     val battery: Int,
     @SerializedName("heart_rate") val heartRate: Int
+)
+
+data class SensorEvent(
+    val id: Int,
+    @SerializedName("user_id") val userId: String,
+    val type: String,
+    val name: String,
+    val description: String,
+    @SerializedName("created_at") val createdAt: String
 )
 
 // ---------------- MAP COMPONENT ----------------
@@ -252,14 +294,14 @@ fun LiveMap(latitude: Double, longitude: Double) {
                     MapView(ctx).apply {
                         setTileSource(TileSourceFactory.MAPNIK)
                         setMultiTouchControls(true)
-                        controller.setZoom(18.0) // Zoomed in closer for GPS tracking
+                        controller.setZoom(18.0)
                         controller.setCenter(GeoPoint(latitude, longitude))
 
                         val marker = Marker(this)
                         marker.position = GeoPoint(latitude, longitude)
                         marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
                         marker.title = "Current Location"
-                        marker.icon = ctx.getDrawable(org.osmdroid.library.R.drawable.person) // Optional: specific icon
+                        marker.icon = ctx.getDrawable(org.osmdroid.library.R.drawable.person)
                         overlays.add(marker)
                     }
                 },
@@ -269,7 +311,7 @@ fun LiveMap(latitude: Double, longitude: Double) {
                         val marker = mapView.overlays[0] as? Marker
                         marker?.position = GeoPoint(latitude, longitude)
                     }
-                    mapView.invalidate() // Force refresh
+                    mapView.invalidate()
                 }
             )
         } else {
@@ -350,6 +392,68 @@ fun SenseWayApp() {
     }
 }
 
+/* ---------- EVENT ITEM CARD ---------- */
+
+@Composable
+fun EventItemCard(event: SensorEvent) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(80.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = DarkSurface,
+        tonalElevation = 4.dp
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Color strip
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(10.dp)
+                    .background(
+                        when (event.type.lowercase()) {
+                            "warning" -> Color(0xFFF59E0B)
+                            "critical" -> Color(0xFFEF4444)
+                            else -> Accent
+                        }
+                    )
+            )
+
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                    .weight(1f),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = event.name,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp,
+                    color = Color.White
+                )
+                Text(
+                    text = event.description,
+                    fontSize = 13.sp,
+                    color = Color(0xFF9CA3AF),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Text(
+                text = event.type.uppercase(),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF6B7280),
+                modifier = Modifier.padding(end = 16.dp)
+            )
+        }
+    }
+}
+
 /* ---------- DASHBOARD SCREEN ---------- */
 
 @Composable
@@ -377,14 +481,17 @@ fun DashboardScreen(
                 Manifest.permission.ACCESS_COARSE_LOCATION
             )
         )
-        // Attempt start in case already granted
         viewModel.startLocationUpdates()
     }
     // --------------------------
 
+    // --- SCROLL STATE ---
+    val scrollState = rememberScrollState()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(scrollState)
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -419,7 +526,7 @@ fun DashboardScreen(
             )
         }
 
-        // Bluetooth Status Card
+        // Bluetooth Status
         LargeStatusCard(
             title = "Bluetooth Status",
             subtitle = viewModel.connectionState,
@@ -455,12 +562,30 @@ fun DashboardScreen(
         // Map
         LiveMap(latitude = viewModel.latitude, longitude = viewModel.longitude)
 
-        // Events
-        BigBlockCard(
-            title = "Events",
-            description = "No recent events. All clear ✨",
-            icon = { Icon(Icons.Filled.Notifications, null) }
+        // Events Section
+        Text(
+            "Recent Events",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 4.dp, top = 8.dp)
         )
+
+        if (viewModel.events.isEmpty()) {
+            BigBlockCard(
+                title = "No Events",
+                description = "No recent events found. All clear ✨",
+                icon = { Icon(Icons.Filled.Notifications, null) }
+            )
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                viewModel.events.forEach { event ->
+                    EventItemCard(event)
+                }
+            }
+        }
+
+        // Extra spacer
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
@@ -602,8 +727,6 @@ fun BackendStatsScreen(
     val sampleStats = listOf(
         BackendStat("Bluetooth Status", viewModel.connectionState, "Live connection status"),
         BackendStat("Heart Rate", "${viewModel.heartRate} bpm", "Sensor reading"),
-
-        // --- NEW CARDS ---
         BackendStat(
             "Accelerometer",
             formatVector(viewModel.accelerometer),
@@ -619,8 +742,6 @@ fun BackendStatsScreen(
             "%.1f cm".format(viewModel.lidarDistance),
             "Obstacle distance"
         ),
-        // -----------------
-
         BackendStat("Battery Percentage", "${viewModel.battery}%", "Battery Health 100%"),
         BackendStat("Current Location", "${String.format("%.4f", viewModel.latitude)}° N, ${String.format("%.4f", viewModel.longitude)}° W", "GPS")
     )
