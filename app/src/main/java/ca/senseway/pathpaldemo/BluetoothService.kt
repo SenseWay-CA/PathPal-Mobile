@@ -16,7 +16,9 @@ data class PiSensorData(
     val bpm: Int = 0,
     val dist_cm: Double = 0.0,
     val accel: List<Double> = listOf(0.0, 0.0, 0.0),
-    val gyro: List<Double> = listOf(0.0, 0.0, 0.0)
+    val gyro: List<Double> = listOf(0.0, 0.0, 0.0),
+    // New field for the image
+    val image: String = ""
 )
 
 class BluetoothService(private val bluetoothAdapter: BluetoothAdapter?) {
