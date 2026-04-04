@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -25,9 +26,9 @@ data class AppNotification(
 enum class AlertSeverity { SAFE, CAUTION, UNSAFE }
 
 data class WeatherAlert(
-    val category:    String,       // "Pavement Safety", "Wind", "Air Quality", etc.
-    val title:       String,       // Short headline
-    val description: String,       // One-sentence detail
+    val category:    String,
+    val title:       String,
+    val description: String,
     val severity:    AlertSeverity
 )
 
@@ -67,7 +68,10 @@ class AppViewModel : ViewModel() {
     val userId = "c1987b12-3ffe-432a-ac13-4b06264409ed"
     val notifications = mutableStateListOf<AppNotification>()
 
-    // Tracks last coordinates we fetched weather for (to detect significant movement)
+    // Coroutine jobs — cancelled on logout so stale loops can't stack on re-login
+    private var pollingJob: Job? = null
+    private var weatherJob: Job? = null
+
     private var lastWeatherLat = Double.NaN
     private var lastWeatherLon = Double.NaN
     private var hadFirstGpsFix = false
@@ -91,6 +95,11 @@ class AppViewModel : ViewModel() {
         hadFirstGpsFix = false
         lastWeatherLat = Double.NaN
         lastWeatherLon = Double.NaN
+        // Cancel running coroutines so they don't accumulate on re-login
+        pollingJob?.cancel()
+        weatherJob?.cancel()
+        pollingJob = null
+        weatherJob = null
     }
 
     fun dismissNotification(id: Long) {
@@ -100,7 +109,8 @@ class AppViewModel : ViewModel() {
     // ── Device polling (3 s) ─────────────────────────────────────────────────
 
     private fun startPolling() {
-        viewModelScope.launch {
+        pollingJob?.cancel()
+        pollingJob = viewModelScope.launch {
             while (isLoggedIn) {
                 try {
                     val s = ApiClient.api.getStatus(userId)
@@ -111,14 +121,12 @@ class AppViewModel : ViewModel() {
 
                     if (latitude != 0.0 && longitude != 0.0) {
                         if (!hadFirstGpsFix) {
-                            // First fix: fetch weather + air quality immediately
                             hadFirstGpsFix = true
                             lastWeatherLat = latitude
                             lastWeatherLon = longitude
                             viewModelScope.launch { fetchWeather(latitude, longitude) }
                             viewModelScope.launch { fetchAirQuality(latitude, longitude) }
                         } else {
-                            // Significant movement (≈1.1 km) → refresh elevation & weather
                             val moved = abs(latitude  - lastWeatherLat) > 0.01 ||
                                         abs(longitude - lastWeatherLon) > 0.01
                             if (moved) {
@@ -139,8 +147,9 @@ class AppViewModel : ViewModel() {
     // ── Weather polling (every 10 min) ───────────────────────────────────────
 
     private fun startWeatherPolling() {
-        viewModelScope.launch {
-            delay(10 * 60 * 1_000L)          // first fetch handled by GPS fix above
+        weatherJob?.cancel()
+        weatherJob = viewModelScope.launch {
+            delay(10 * 60 * 1_000L)
             while (isLoggedIn) {
                 if (latitude != 0.0 && longitude != 0.0) {
                     fetchWeather(latitude, longitude)
@@ -168,7 +177,7 @@ class AppViewModel : ViewModel() {
             precipitation       = r.current.precipitation
             weatherCode         = r.current.weather_code
             cloudCover          = r.current.cloud_cover
-            r.elevation?.let { elevation = it }   // free elevation in weather response
+            r.elevation?.let { elevation = it }
         } catch (e: Exception) {
             Log.e("WeatherVM", "Weather fetch failed", e)
         }
@@ -192,7 +201,8 @@ class AppViewModel : ViewModel() {
 
     private fun buildAlerts(): List<WeatherAlert> {
         val alerts = mutableListOf<WeatherAlert>()
-        val icy = temperature < 2.0 && humidity > 65
+        val tempSafe = !temperature.isNaN()
+        val icy = tempSafe && temperature < 2.0 && humidity > 65
 
         // — Pavement safety (most important, always first)
         when {
@@ -223,37 +233,41 @@ class AppViewModel : ViewModel() {
         }
 
         // — Wind
-        when {
-            windSpeed > 60 -> alerts += WeatherAlert(
-                "Wind", "Dangerous winds — ${windSpeed.toInt()} km/h",
-                "Severe wind gusts. Stay indoors and away from windows.", AlertSeverity.UNSAFE
-            )
-            windSpeed > 35 -> alerts += WeatherAlert(
-                "Wind", "Strong winds — ${windSpeed.toInt()} km/h",
-                "Grip handrails and secure loose items outdoors.", AlertSeverity.CAUTION
-            )
-            else -> { /* no wind alert */ }
+        if (!windSpeed.isNaN()) {
+            when {
+                windSpeed > 60 -> alerts += WeatherAlert(
+                    "Wind", "Dangerous winds — ${windSpeed.toInt()} km/h",
+                    "Severe wind gusts. Stay indoors and away from windows.", AlertSeverity.UNSAFE
+                )
+                windSpeed > 35 -> alerts += WeatherAlert(
+                    "Wind", "Strong winds — ${windSpeed.toInt()} km/h",
+                    "Grip handrails and secure loose items outdoors.", AlertSeverity.CAUTION
+                )
+                else -> {}
+            }
         }
 
         // — Temperature extremes
-        when {
-            temperature < -15 -> alerts += WeatherAlert(
-                "Temperature", "Extreme cold — ${temperature.toInt()}°C",
-                "Frostbite risk within minutes of exposure. Stay indoors.", AlertSeverity.UNSAFE
-            )
-            temperature < 0 -> alerts += WeatherAlert(
-                "Temperature", "Below freezing — ${temperature.toInt()}°C",
-                "Wear warm layers, cover extremities, and watch for ice.", AlertSeverity.CAUTION
-            )
-            temperature > 38 -> alerts += WeatherAlert(
-                "Temperature", "Extreme heat — ${temperature.toInt()}°C",
-                "Heat exhaustion risk. Hydrate frequently and seek shade.", AlertSeverity.UNSAFE
-            )
-            temperature > 32 -> alerts += WeatherAlert(
-                "Temperature", "High heat — ${temperature.toInt()}°C",
-                "Avoid prolonged sun exposure and wear light clothing.", AlertSeverity.CAUTION
-            )
-            else -> { /* comfortable */ }
+        if (tempSafe) {
+            when {
+                temperature < -15 -> alerts += WeatherAlert(
+                    "Temperature", "Extreme cold — ${temperature.toInt()}°C",
+                    "Frostbite risk within minutes of exposure. Stay indoors.", AlertSeverity.UNSAFE
+                )
+                temperature < 0 -> alerts += WeatherAlert(
+                    "Temperature", "Below freezing — ${temperature.toInt()}°C",
+                    "Wear warm layers, cover extremities, and watch for ice.", AlertSeverity.CAUTION
+                )
+                temperature > 38 -> alerts += WeatherAlert(
+                    "Temperature", "Extreme heat — ${temperature.toInt()}°C",
+                    "Heat exhaustion risk. Hydrate frequently and seek shade.", AlertSeverity.UNSAFE
+                )
+                temperature > 32 -> alerts += WeatherAlert(
+                    "Temperature", "High heat — ${temperature.toInt()}°C",
+                    "Avoid prolonged sun exposure and wear light clothing.", AlertSeverity.CAUTION
+                )
+                else -> {}
+            }
         }
 
         // — Visibility / fog

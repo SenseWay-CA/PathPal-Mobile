@@ -4,6 +4,7 @@ package ca.senseway.pathpaldemo
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.ComponentActivity
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
@@ -32,11 +33,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import android.graphics.Bitmap as AndroidBitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Paint as AndroidPaint
 import android.graphics.drawable.BitmapDrawable
 import java.util.Locale
+import kotlin.math.sin
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.GeoPoint
@@ -133,6 +137,93 @@ fun temperatureColor(temp: Double): Color = when {
     else        -> Color(0xFF80CFFF)
 }
 
+// ── Weather ambient particle effect (snow / rain) ────────────────────────────
+private data class WeatherParticle(
+    val x: Float,       // 0..1 normalised start x
+    val phase: Float,   // 0..1 timing phase offset
+    val size: Float,    // draw radius / stroke width
+    val alpha: Float,   // opacity
+    val track: Int,     // 0=slow, 1=medium, 2=fast
+    val drift: Float    // x drift per progress unit
+)
+
+@Composable
+fun WeatherParticleEffect(
+    weatherCode: Int,
+    temperature: Double,
+    modifier: Modifier = Modifier
+) {
+    val isSnow = weatherCode in 71..77 || weatherCode in 85..86 ||
+                 (!temperature.isNaN() && temperature < 0.0)
+    val isRain = !isSnow && (weatherCode in 51..67 || weatherCode in 80..82)
+
+    if (!isSnow && !isRain) return
+
+    val particles = remember(isSnow) {
+        val rng = java.util.Random(77L)
+        val count = if (isSnow) 55 else 90
+        List(count) {
+            WeatherParticle(
+                x     = rng.nextFloat(),
+                phase = rng.nextFloat(),
+                size  = if (isSnow) rng.nextFloat() * 3.5f + 1.5f
+                        else rng.nextFloat() * 0.9f + 0.4f,
+                alpha = rng.nextFloat() * 0.28f + 0.07f,
+                track = rng.nextInt(3),
+                drift = rng.nextFloat() * 0.06f - 0.03f
+            )
+        }
+    }
+
+    val transition = rememberInfiniteTransition(label = "wxfx")
+    val t1 by transition.animateFloat(
+        0f, 1f,
+        infiniteRepeatable(tween(if (isSnow) 22_000 else 3_200, easing = LinearEasing)),
+        label = "t1"
+    )
+    val t2 by transition.animateFloat(
+        0f, 1f,
+        infiniteRepeatable(tween(if (isSnow) 15_000 else 2_100, easing = LinearEasing)),
+        label = "t2"
+    )
+    val t3 by transition.animateFloat(
+        0f, 1f,
+        infiniteRepeatable(tween(if (isSnow) 10_000 else 1_400, easing = LinearEasing)),
+        label = "t3"
+    )
+
+    Canvas(modifier = modifier) {
+        particles.forEach { p ->
+            val t       = when (p.track) { 0 -> t1; 1 -> t2; else -> t3 }
+            val progress = (t + p.phase) % 1f
+
+            // Snow drifts side-to-side with a gentle sine wave
+            val sineShift = if (isSnow)
+                sin((t + p.phase).toDouble() * 6.2831853 * 1.5).toFloat() * p.drift
+            else 0f
+
+            val px = ((p.x + sineShift + 1f) % 1f) * size.width
+            val py = progress * size.height
+
+            if (isSnow) {
+                drawCircle(
+                    color  = Color.White.copy(alpha = p.alpha),
+                    radius = p.size,
+                    center = Offset(px, py)
+                )
+            } else {
+                // Rain: short angled streaks
+                drawLine(
+                    color       = Color(0xFF8BBCD4).copy(alpha = p.alpha * 0.65f),
+                    start       = Offset(px, py),
+                    end         = Offset(px + 2.5f, py + 13f),
+                    strokeWidth = p.size
+                )
+            }
+        }
+    }
+}
+
 // ── DashboardScreen ──────────────────────────────────────────────────────────
 @Composable
 fun DashboardScreen(viewModel: AppViewModel) {
@@ -166,13 +257,22 @@ fun DashboardScreen(viewModel: AppViewModel) {
         Box(Modifier.fillMaxSize()) {
             if (viewModel.latitude != 0.0 && viewModel.longitude != 0.0) {
                 OsmFullMap(
-                    latitude    = viewModel.latitude,
-                    longitude   = viewModel.longitude,
+                    latitude     = viewModel.latitude,
+                    longitude    = viewModel.longitude,
                     onMapCreated = { mapViewRef = it }
                 )
                 LiveLocationOverlay(modifier = Modifier.align(Alignment.Center))
             } else {
                 GpsAcquiringScreen()
+            }
+
+            // Ambient weather particles — subtle overlay on top of the map
+            if (viewModel.weatherCode >= 0) {
+                WeatherParticleEffect(
+                    weatherCode = viewModel.weatherCode,
+                    temperature = viewModel.temperature,
+                    modifier    = Modifier.fillMaxSize()
+                )
             }
 
             // Top vignette
@@ -195,23 +295,25 @@ fun DashboardScreen(viewModel: AppViewModel) {
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     MapFab(Icons.Default.Map, "Open in Google Maps") {
-                        val uri = Uri.parse(
-                            "geo:${viewModel.latitude},${viewModel.longitude}" +
-                            "?q=${viewModel.latitude},${viewModel.longitude}(PathPal+Device)"
-                        )
-                        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                            setPackage("com.google.android.apps.maps")
-                        }
-                        if (intent.resolveActivity(ctx.packageManager) != null) {
-                            ctx.startActivity(intent)
-                        } else {
-                            ctx.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse(
-                                    "https://www.google.com/maps/search/?api=1" +
-                                    "&query=${viewModel.latitude},${viewModel.longitude}"
-                                ))
+                        try {
+                            val uri = Uri.parse(
+                                "geo:${viewModel.latitude},${viewModel.longitude}" +
+                                "?q=${viewModel.latitude},${viewModel.longitude}(PathPal+Device)"
                             )
-                        }
+                            val gmaps = Intent(Intent.ACTION_VIEW, uri).apply {
+                                setPackage("com.google.android.apps.maps")
+                            }
+                            if (gmaps.resolveActivity(ctx.packageManager) != null) {
+                                ctx.startActivity(gmaps)
+                            } else {
+                                ctx.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(
+                                        "https://www.google.com/maps/search/?api=1" +
+                                        "&query=${viewModel.latitude},${viewModel.longitude}"
+                                    ))
+                                )
+                            }
+                        } catch (_: Exception) { /* no browser / maps installed */ }
                     }
                     MapFab(Icons.Default.GpsFixed, "Recenter", iconTint = TextGray) {
                         mapViewRef?.controller?.animateTo(
@@ -651,6 +753,27 @@ fun OsmFullMap(
     longitude:    Double,
     onMapCreated: (MapView) -> Unit = {}
 ) {
+    val mapRef  = remember { mutableStateOf<MapView?>(null) }
+    val context = LocalContext.current
+
+    // Properly pause/resume the osmdroid MapView with the Activity lifecycle.
+    // Without this, tile downloads continue when the app is backgrounded.
+    DisposableEffect(Unit) {
+        val activity = context as? ComponentActivity
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> mapRef.value?.onResume()
+                Lifecycle.Event.ON_PAUSE  -> mapRef.value?.onPause()
+                else -> {}
+            }
+        }
+        activity?.lifecycle?.addObserver(observer)
+        onDispose {
+            activity?.lifecycle?.removeObserver(observer)
+            mapRef.value?.onPause()
+        }
+    }
+
     AndroidView(
         modifier = Modifier.fillMaxSize(),
         factory  = { ctx ->
@@ -669,6 +792,7 @@ fun OsmFullMap(
                     title    = null
                 }
                 overlays.add(marker)
+                mapRef.value = this
                 onMapCreated(this)
             }
         },

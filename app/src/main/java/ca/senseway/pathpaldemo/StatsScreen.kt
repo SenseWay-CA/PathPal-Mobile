@@ -193,7 +193,7 @@ fun SensorsTab(viewModel: AppViewModel) {
                 StatDataCard(
                     Modifier.weight(1f),
                     label = "Altitude",
-                    value = "23.4 m",
+                    value = if (!viewModel.elevation.isNaN()) "${viewModel.elevation.toInt()} m" else "-- m",
                     sub = "Above sea level",
                     color = VioletAccent
                 )

@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -95,17 +96,20 @@ fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
         ) {
             Spacer(Modifier.height(80.dp))
 
-            // Logo
+            // PathPal logo — gradient background, white icon (modern app-icon style)
             Box(
-                Modifier
+                modifier = Modifier
                     .size(84.dp)
-                    .background(
-                        Brush.linearGradient(listOf(ElectricBlue, VioletAccent)),
-                        RoundedCornerShape(26.dp)
-                    ),
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(Brush.linearGradient(listOf(ElectricBlue, VioletAccent))),
                 contentAlignment = Alignment.Center
             ) {
-                Text("S", fontSize = 42.sp, fontWeight = FontWeight.Black, color = Color.White)
+                Icon(
+                    painter = painterResource(R.drawable.ic_pathpal_logo),
+                    contentDescription = "PathPal",
+                    tint = Color.White,
+                    modifier = Modifier.size(58.dp)
+                )
             }
 
             Spacer(Modifier.height(20.dp))
@@ -316,11 +320,11 @@ fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
                         .clip(RoundedCornerShape(13.dp))
                         .background(BgDeep)
                         .clickable {
-                            val intent = Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://senseway.ca/register")
-                            )
-                            context.startActivity(intent)
+                            try {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse("https://senseway.ca/register"))
+                                )
+                            } catch (_: Exception) { /* no browser installed */ }
                         },
                     contentAlignment = Alignment.Center
                 ) {

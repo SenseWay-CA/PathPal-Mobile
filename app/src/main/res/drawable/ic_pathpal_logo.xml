@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="100dp"
+    android:height="100dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+
+    <!-- Location pin with inner circle cutout (evenOdd creates the hole) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="
+        M50,8 C38.95,8 30,16.95 30,29 C30,44 50,66 50,66 C50,66 70,44 70,29 C70,16.95 61.05,8 50,8 Z
+        M50,40 C44.48,40 40,35.52 40,29 C40,23.48 44.48,19 50,19 C55.52,19 60,23.48 60,29 C60,35.52 55.52,40 50,40 Z" />
+
+    <!-- Path trail dots -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,74 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,80 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M60,74 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0 Z" />
+</vector>
