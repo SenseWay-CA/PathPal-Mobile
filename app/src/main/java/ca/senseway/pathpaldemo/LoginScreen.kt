@@ -4,6 +4,11 @@ package ca.senseway.pathpaldemo
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -24,6 +29,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -50,6 +56,20 @@ fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
     val isEnabled = username.isNotBlank() && password.isNotBlank()
+
+    // Entrance animation — content slides up + fades in on first composition
+    var contentVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { contentVisible = true }
+    val enterOffset by animateDpAsState(
+        targetValue   = if (contentVisible) 0.dp else 48.dp,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        label = "login_enter_y"
+    )
+    val enterAlpha by animateFloatAsState(
+        targetValue   = if (contentVisible) 1f else 0f,
+        animationSpec = tween(380),
+        label = "login_enter_a"
+    )
 
     Box(
         modifier = Modifier
@@ -91,7 +111,9 @@ fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 28.dp),
+                .padding(horizontal = 28.dp)
+                .offset(y = enterOffset)
+                .alpha(enterAlpha),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(Modifier.height(80.dp))

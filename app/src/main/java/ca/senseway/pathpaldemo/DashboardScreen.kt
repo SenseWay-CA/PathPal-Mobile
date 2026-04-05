@@ -919,7 +919,16 @@ fun DashMetricCard(
                 Icon(icon, null, tint = effectiveTint, modifier = iconMod)
             }
             Column {
-                Text(value, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = valueColor)
+                AnimatedContent(
+                    targetState  = value,
+                    transitionSpec = {
+                        slideInVertically { it } + fadeIn(tween(180)) togetherWith
+                        slideOutVertically { -it } + fadeOut(tween(180))
+                    },
+                    label = "mv_$label"
+                ) { v ->
+                    Text(v, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = valueColor)
+                }
                 Text(label, fontSize = 11.sp, color = TextMuted)
             }
         }

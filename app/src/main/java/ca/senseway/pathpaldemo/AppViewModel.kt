@@ -1,11 +1,13 @@
 package ca.senseway.pathpaldemo
 
+import android.app.Application
+import android.content.Context
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -33,7 +35,8 @@ data class WeatherAlert(
 )
 
 // ── ViewModel ───────────────────────────────────────────────────────────────
-class AppViewModel : ViewModel() {
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+    private val prefs = app.getSharedPreferences("pathpal_prefs", Context.MODE_PRIVATE)
 
     // Auth
     var isLoggedIn  by mutableStateOf(false);   private set
@@ -76,6 +79,15 @@ class AppViewModel : ViewModel() {
     private var lastWeatherLon = Double.NaN
     private var hadFirstGpsFix = false
 
+    init {
+        // Restore session so the user stays logged in until they explicitly sign out
+        if (prefs.getBoolean("logged_in", false)) {
+            isLoggedIn = true
+            startPolling()
+            startWeatherPolling()
+        }
+    }
+
     // ── Auth ─────────────────────────────────────────────────────────────────
 
     fun login(username: String, password: String) {
@@ -83,6 +95,7 @@ class AppViewModel : ViewModel() {
             isLoggedIn = true
             loginError = null
             hadFirstGpsFix = false
+            prefs.edit().putBoolean("logged_in", true).apply()
             startPolling()
             startWeatherPolling()
         } else {
@@ -95,7 +108,7 @@ class AppViewModel : ViewModel() {
         hadFirstGpsFix = false
         lastWeatherLat = Double.NaN
         lastWeatherLon = Double.NaN
-        // Cancel running coroutines so they don't accumulate on re-login
+        prefs.edit().remove("logged_in").apply()
         pollingJob?.cancel()
         weatherJob?.cancel()
         pollingJob = null

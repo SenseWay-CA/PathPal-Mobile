@@ -13,11 +13,17 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -247,9 +253,9 @@ fun AppNavBar(
     modifier:      Modifier = Modifier
 ) {
     val navItems = listOf(
-        Triple(Icons.Default.Map,      Icons.Default.Map,      "Map"),
-        Triple(Icons.Default.BarChart, Icons.Default.BarChart, "Sensors"),
-        Triple(Icons.Default.Settings, Icons.Default.Settings, "Settings")
+        Icons.Default.Map       to "Map",
+        Icons.Default.BarChart  to "Sensors",
+        Icons.Default.Settings  to "Settings"
     )
 
     Surface(
@@ -259,45 +265,78 @@ fun AppNavBar(
         shape           = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
         border          = BorderStroke(1.dp, CardBorder)
     ) {
-        Row(
+        BoxWithConstraints(
             Modifier
                 .fillMaxWidth()
                 .height(76.dp)
-                .padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment     = Alignment.CenterVertically
         ) {
-            navItems.forEachIndexed { index, (icon, _, label) ->
-                val selected = currentTab == index
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .clickable { onTabSelected(index) }
-                        .padding(horizontal = 22.dp, vertical = 8.dp)
-                ) {
-                    Box(
-                        Modifier
-                            .size(40.dp)
-                            .then(
-                                if (selected) Modifier.background(
-                                    Brush.linearGradient(
-                                        listOf(ElectricBlue.copy(alpha = 0.22f), VioletAccent.copy(alpha = 0.22f))
-                                    ),
-                                    RoundedCornerShape(12.dp)
-                                ) else Modifier
-                            ),
-                        contentAlignment = Alignment.Center
+            // Sliding pill — animates with spring physics when tab changes
+            val itemWidth  = maxWidth / 3
+            val pillWidth  = itemWidth * 0.72f
+            val targetOff  = itemWidth * currentTab + (itemWidth - pillWidth) / 2
+            val pillOffset by animateDpAsState(
+                targetValue   = targetOff,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness    = Spring.StiffnessMediumLow
+                ),
+                label = "nav_pill"
+            )
+            Box(
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .offset(x = pillOffset)
+                    .width(pillWidth)
+                    .height(50.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(ElectricBlue.copy(alpha = 0.18f), VioletAccent.copy(alpha = 0.18f))
+                        )
+                    )
+            )
+
+            // Tab icons + labels
+            Row(
+                Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.Start,
+                verticalAlignment     = Alignment.CenterVertically
+            ) {
+                navItems.forEachIndexed { index, (icon, label) ->
+                    val selected  = currentTab == index
+                    val iconSize by animateDpAsState(
+                        targetValue   = if (selected) 23.dp else 20.dp,
+                        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+                        label         = "icon_sz_$index"
+                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { onTabSelected(index) }
+                            .padding(vertical = 8.dp)
                     ) {
                         Icon(
                             icon, null,
                             tint     = if (selected) ElectricBlue else TextMuted,
-                            modifier = Modifier.size(if (selected) 22.dp else 20.dp)
+                            modifier = Modifier.size(iconSize)
                         )
-                    }
-                    if (selected) {
-                        Spacer(Modifier.height(3.dp))
-                        Text(label, fontSize = 10.sp, color = ElectricBlue, fontWeight = FontWeight.SemiBold)
+                        AnimatedVisibility(
+                            visible = selected,
+                            enter   = fadeIn() + expandVertically(expandFrom = Alignment.Top),
+                            exit    = fadeOut() + shrinkVertically(shrinkTowards = Alignment.Top)
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Spacer(Modifier.height(3.dp))
+                                Text(
+                                    label,
+                                    fontSize   = 10.sp,
+                                    color      = ElectricBlue,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
                     }
                 }
             }
