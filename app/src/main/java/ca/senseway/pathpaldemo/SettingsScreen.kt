@@ -62,12 +62,16 @@ fun SettingsScreen(viewModel: AppViewModel, onLogout: () -> Unit) {
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("A", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White)
+                    Text(
+                        viewModel.displayInitial,
+                        fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White
+                    )
                 }
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("admin", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TextWhite)
-                    Text("SenseWay User", fontSize = 13.sp, color = TextMuted)
+                    Text(viewModel.displayName, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = TextWhite)
+                    Text(viewModel.displayEmail, fontSize = 12.sp, color = TextMuted)
+                    Text(viewModel.displayType,  fontSize = 12.sp, color = TextMuted)
                 }
                 Surface(
                     shape = RoundedCornerShape(10.dp),

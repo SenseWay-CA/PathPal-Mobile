@@ -1,35 +1,146 @@
 package ca.senseway.pathpaldemo
 
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
+import okhttp3.OkHttpClient
+import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
-import retrofit2.http.GET
-import retrofit2.http.Query
+import retrofit2.http.*
 
-// ── Senseway device API ─────────────────────────────────────────────────────
-object ApiClient {
+// In-memory cookie store — persists the session cookie across all API calls.
+// Uses java.net.URI for host extraction to stay compatible with all OkHttp versions.
+private val sessionCookieJar = object : CookieJar {
+    private val store = HashMap<String, List<Cookie>>()
+
+    private fun host(url: HttpUrl): String =
+        runCatching { java.net.URI(url.toString()).host }.getOrNull() ?: url.toString()
+
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        store[host(url)] = cookies
+    }
+    override fun loadForRequest(url: HttpUrl): List<Cookie> =
+        store[host(url)] ?: emptyList()
+}
+
+// Single OkHttpClient shared by the Senseway Retrofit instance
+val sensewayHttpClient: OkHttpClient = OkHttpClient.Builder()
+    .cookieJar(sessionCookieJar)
+    .build()
+
+// Senseway API (cookie-based session auth, mirrors web app credentials:include)
+object SenseWayClient {
     private const val BASE_URL = "https://api.senseway.ca/"
     val api: SenseWayApi by lazy {
         Retrofit.Builder()
             .baseUrl(BASE_URL)
+            .client(sensewayHttpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(SenseWayApi::class.java)
     }
 }
 
-interface SenseWayApi {
-    @GET("status")
-    suspend fun getStatus(@Query("user_id") userId: String): StatusResponse
-}
+// Request / response DTOs
 
-data class StatusResponse(
-    val battery: Int,
-    val heart_rate: Int?,
-    val latitude: Double?,
-    val longitude: Double?
+data class LoginRequest(
+    val email:    String,
+    val password: String
 )
 
-// ── Open-Meteo (free, no API key — weather forecast + terrain elevation) ────
+data class UserDto(
+    val user_id:    String?,
+    val email:      String?,
+    val name:       String?,
+    val type:       String?,
+    val birth_date: String?,
+    val home_long:  Double?,
+    val home_lat:   Double?,
+    val avatar_url: String?
+)
+
+data class StatusDto(
+    val id:         Int?,
+    val user_id:    String?,
+    val longitude:  Double?,
+    val latitude:   Double?,
+    val battery:    Int?,
+    val heart_rate: Int?,
+    val created_at: String?
+)
+
+data class GeofenceDto(
+    val id:          Int?,
+    val user_id:     String?,
+    val name:        String?,
+    val enabled:     Boolean?,
+    val latitude:    Double?,
+    val longitude:   Double?,
+    val radius:      Double?,      // metres
+    val starts_at:   String?,
+    val ends_at:     String?,
+    val timed_title: String?,
+    val set_timed:   Boolean?
+)
+
+data class EventDto(
+    val id:         Int?,
+    val user_id:    String?,
+    val type:       String?,
+    val message:    String?,
+    val created_at: String?
+)
+
+data class AppointmentDto(
+    val id:          Int?,
+    val user_id:     String?,
+    val title:       String?,
+    val location:    String?,
+    val description: String?,
+    val start_at:    String?,
+    val end_at:      String?,
+    val fence_id:    Int?
+)
+
+// API interface — after login the app only calls GET endpoints
+interface SenseWayApi {
+
+    // Auth
+    @POST("login")
+    suspend fun login(@Body body: LoginRequest): Response<UserDto>
+
+    @GET("session")
+    suspend fun checkSession(): Response<UserDto>
+
+    @DELETE("session")
+    suspend fun logout(): Response<Unit>
+
+    // User (read-only post-login)
+    @GET("user")
+    suspend fun getUser(@Query("user_id") userId: String): Response<UserDto>
+
+    // Device status (read-only, polled every 3 s)
+    @GET("status")
+    suspend fun getStatus(@Query("user_id") userId: String): Response<StatusDto>
+
+    // Events (read-only)
+    @GET("events")
+    suspend fun getEvents(
+        @Query("user_id")  userId:   String,
+        @Query("quantity") quantity: Int = 100
+    ): Response<List<EventDto>>
+
+    // Geofences (read-only)
+    @GET("fences")
+    suspend fun listFences(@Query("user_id") userId: String): Response<List<GeofenceDto>>
+
+    // Appointments (read-only)
+    @GET("appointments")
+    suspend fun listAppointments(@Query("user_id") userId: String): Response<List<AppointmentDto>>
+}
+
+// Open-Meteo weather + terrain elevation (free, no API key)
 object OpenMeteoClient {
     private const val BASE_URL = "https://api.open-meteo.com/"
     val api: OpenMeteoApi by lazy {
@@ -42,19 +153,18 @@ object OpenMeteoClient {
 }
 
 interface OpenMeteoApi {
-    // Elevation is returned for free alongside the weather response
     @GET("v1/forecast")
     suspend fun getWeather(
-        @Query("latitude")        lat:       Double,
-        @Query("longitude")       lon:       Double,
-        @Query("current")         current:   String,
-        @Query("wind_speed_unit") windUnit:  String = "kmh",
-        @Query("timezone")        timezone:  String = "auto"
+        @Query("latitude")        lat:      Double,
+        @Query("longitude")       lon:      Double,
+        @Query("current")         current:  String,
+        @Query("wind_speed_unit") windUnit: String = "kmh",
+        @Query("timezone")        timezone: String = "auto"
     ): WeatherResponse
 }
 
 data class WeatherResponse(
-    val elevation: Double?,          // terrain elevation at this coordinate (metres)
+    val elevation: Double?,
     val current:   CurrentWeather
 )
 
@@ -68,7 +178,7 @@ data class CurrentWeather(
     val cloud_cover:          Int
 )
 
-// ── Open-Meteo Air Quality (free, no API key — AQI, PM2.5, UV) ─────────────
+// Open-Meteo Air Quality (free, no API key)
 object AirQualityClient {
     private const val BASE_URL = "https://air-quality-api.open-meteo.com/"
     val api: AirQualityApi by lazy {

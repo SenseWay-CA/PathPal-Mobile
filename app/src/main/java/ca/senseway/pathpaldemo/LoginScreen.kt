@@ -47,15 +47,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 @Composable
-fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
-    val context = LocalContext.current
+fun LoginScreen(
+    onLogin:        (String, String) -> Unit,
+    loginError:     String?,
+    isLoginLoading: Boolean = false
+) {
+    val context      = LocalContext.current
     val focusManager = LocalFocusManager.current
     val passwordFocus = remember { FocusRequester() }
 
-    var username by remember { mutableStateOf("") }
+    var email    by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
-    val isEnabled = username.isNotBlank() && password.isNotBlank()
+    val isEnabled = email.isNotBlank() && password.isNotBlank() && !isLoginLoading
 
     // Entrance animation — content slides up + fades in on first composition
     var contentVisible by remember { mutableStateOf(false) }
@@ -178,28 +182,31 @@ fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
 
                     Spacer(Modifier.height(4.dp))
 
-                    // Username field
+                    // Email field
                     OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it },
-                        label = { Text("Username") },
+                        value = email,
+                        onValueChange = { email = it },
+                        label = { Text("Email") },
                         leadingIcon = {
-                            Icon(Icons.Default.Person, null, tint = ElectricBlue)
+                            Icon(Icons.Default.Email, null, tint = ElectricBlue)
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(14.dp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = ElectricBlue,
+                            focusedBorderColor   = ElectricBlue,
                             unfocusedBorderColor = CardBorder,
-                            focusedLabelColor = ElectricBlue,
-                            unfocusedLabelColor = TextMuted,
-                            focusedTextColor = TextWhite,
-                            unfocusedTextColor = TextGray,
-                            cursorColor = ElectricBlue,
-                            focusedContainerColor = PanelPurple2,
+                            focusedLabelColor    = ElectricBlue,
+                            unfocusedLabelColor  = TextMuted,
+                            focusedTextColor     = TextWhite,
+                            unfocusedTextColor   = TextGray,
+                            cursorColor          = ElectricBlue,
+                            focusedContainerColor   = PanelPurple2,
                             unfocusedContainerColor = Color.Transparent,
                         ),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction    = ImeAction.Next
+                        ),
                         keyboardActions = KeyboardActions(onNext = { passwordFocus.requestFocus() }),
                         singleLine = true
                     )
@@ -243,7 +250,7 @@ fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
                         ),
                         keyboardActions = KeyboardActions(onDone = {
                             focusManager.clearFocus()
-                            if (isEnabled) onLogin(username, password)
+                            if (isEnabled) onLogin(email, password)
                         }),
                         singleLine = true
                     )
@@ -277,32 +284,43 @@ fun LoginScreen(onLogin: (String, String) -> Unit, loginError: String?) {
 
                     Spacer(Modifier.height(4.dp))
 
-                    // Sign In button (gradient)
+                    // Sign In button (gradient, with loading spinner)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(54.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(
-                                if (isEnabled)
+                                if (isEnabled || isLoginLoading)
                                     Brush.horizontalGradient(listOf(ElectricBlue, VioletAccent))
                                 else
                                     Brush.horizontalGradient(
-                                        listOf(ElectricBlue.copy(alpha = 0.35f), VioletAccent.copy(alpha = 0.35f))
+                                        listOf(
+                                            ElectricBlue.copy(alpha = 0.35f),
+                                            VioletAccent.copy(alpha = 0.35f)
+                                        )
                                     )
                             )
                             .clickable(enabled = isEnabled) {
                                 focusManager.clearFocus()
-                                onLogin(username, password)
+                                onLogin(email, password)
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            "Sign In",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
+                        if (isLoginLoading) {
+                            CircularProgressIndicator(
+                                color       = Color.White,
+                                strokeWidth = 2.5.dp,
+                                modifier    = Modifier.size(24.dp)
+                            )
+                        } else {
+                            Text(
+                                "Sign In",
+                                fontSize   = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color      = Color.White
+                            )
+                        }
                     }
                 }
             }

@@ -27,6 +27,10 @@ import androidx.compose.ui.unit.sp
 import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
+import java.time.Duration
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 @Composable
 fun StatsScreen(viewModel: AppViewModel) {
@@ -405,9 +409,55 @@ fun StatDataCard(
     }
 }
 
+// Maps an API event type string to icon, color, and display label
+private fun eventTypeInfo(type: String?): Triple<ImageVector, Color, String> {
+    val t = type?.lowercase(Locale.ROOT) ?: ""
+    return when {
+        t.contains("battery") || t.contains("low_bat")
+            -> Triple(Icons.Default.BatteryAlert,    YellowWarn,          "Battery")
+        t.contains("fence") || t.contains("geo") || t.contains("zone")
+            -> Triple(Icons.Default.LocationOff,     RedAlert,            "Geofence")
+        t.contains("fall") || t.contains("sos") || t.contains("emergency")
+            -> Triple(Icons.Default.Warning,         RedAlert,            "Emergency")
+        t.contains("heart") || t.contains("pulse")
+            -> Triple(Icons.Default.Favorite,        Color(0xFFFF6B8A),   "Heart Rate")
+        t.contains("gps") || t.contains("location") || t.contains("position")
+            -> Triple(Icons.Default.GpsFixed,        ElectricBlue,        "Location")
+        t.contains("step") || t.contains("walk") || t.contains("activity")
+            -> Triple(Icons.Default.DirectionsWalk,  GreenOk,             "Activity")
+        t.contains("enter") || t.contains("return") || t.contains("ok")
+            -> Triple(Icons.Default.CheckCircle,     GreenOk,             "Status")
+        t.contains("temp") || t.contains("weather")
+            -> Triple(Icons.Default.Thermostat,      Color(0xFFFFB830),   "Weather")
+        else
+            -> Triple(Icons.Default.Info,            ElectricBlue,        "Event")
+    }
+}
+
+// Formats an ISO-8601 timestamp into a human-readable relative time string
+private fun formatEventTime(createdAt: String?): String {
+    if (createdAt == null) return ""
+    return try {
+        val odt  = OffsetDateTime.parse(createdAt)
+        val now  = OffsetDateTime.now(ZoneOffset.UTC)
+        val mins = Duration.between(odt.toInstant(), now.toInstant()).toMinutes()
+        when {
+            mins < 1    -> "Just now"
+            mins < 60   -> "${mins}m ago"
+            mins < 1440 -> "${mins / 60}h ago"
+            else        -> odt.format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+        }
+    } catch (_: Exception) {
+        try {
+            // Fallback for timestamps without timezone
+            createdAt.replace("T", " ").take(16)
+        } catch (_: Exception) { "" }
+    }
+}
+
 @Composable
 fun EventsTab(viewModel: AppViewModel) {
-    if (viewModel.notifications.isEmpty()) {
+    if (viewModel.events.isEmpty()) {
         Box(
             Modifier
                 .fillMaxSize()
@@ -422,8 +472,7 @@ fun EventsTab(viewModel: AppViewModel) {
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        Icons.Default.Notifications,
-                        null,
+                        Icons.Default.Notifications, null,
                         tint = TextMuted,
                         modifier = Modifier.size(40.dp)
                     )
@@ -431,15 +480,12 @@ fun EventsTab(viewModel: AppViewModel) {
                 Spacer(Modifier.height(20.dp))
                 Text(
                     "No events yet",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = TextGray
+                    fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = TextGray
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Events will appear here when detected",
-                    fontSize = 13.sp,
-                    color = TextMuted
+                    "Device events will appear here in real time",
+                    fontSize = 13.sp, color = TextMuted
                 )
             }
         }
@@ -451,8 +497,31 @@ fun EventsTab(viewModel: AppViewModel) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
             contentPadding = PaddingValues(vertical = 16.dp)
         ) {
-            items(viewModel.notifications, key = { it.id }) { notif ->
-                EventCard(notif) { viewModel.dismissNotification(notif.id) }
+            item {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "${viewModel.events.size} events",
+                        fontSize = 12.sp, color = TextMuted
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = ElectricBlue.copy(alpha = 0.10f),
+                        border = BorderStroke(1.dp, ElectricBlue.copy(alpha = 0.20f))
+                    ) {
+                        Text(
+                            "Live",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            fontSize = 11.sp, color = ElectricBlue, fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+            items(viewModel.events, key = { it.id ?: System.nanoTime() }) { evt ->
+                ApiEventCard(evt)
             }
             item { Spacer(Modifier.height(80.dp)) }
         }
@@ -460,26 +529,24 @@ fun EventsTab(viewModel: AppViewModel) {
 }
 
 @Composable
-fun EventCard(notification: AppNotification, onDismiss: () -> Unit) {
-    val color = when (notification.type) {
-        NotifType.SUCCESS -> GreenOk
-        NotifType.ALERT   -> RedAlert
-        NotifType.INFO    -> ElectricBlue
-    }
-    val icon = when (notification.type) {
-        NotifType.SUCCESS -> Icons.Default.CheckCircle
-        NotifType.ALERT   -> Icons.Default.Warning
-        NotifType.INFO    -> Icons.Default.Info
-    }
+fun ApiEventCard(event: EventDto) {
+    val (icon, color, label) = eventTypeInfo(event.type)
+    val timeStr = formatEventTime(event.created_at)
+    val displayType = event.type
+        ?.replace("_", " ")
+        ?.split(" ")
+        ?.joinToString(" ") { w -> w.replaceFirstChar { c -> c.uppercaseChar() } }
+        ?: label
+
     Surface(
         Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = PanelPurple,
-        border = BorderStroke(1.dp, color.copy(alpha = 0.3f))
+        shape  = RoundedCornerShape(16.dp),
+        color  = PanelPurple,
+        border = BorderStroke(1.dp, color.copy(alpha = 0.28f))
     ) {
         Row(
             Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.Top
         ) {
             Box(
                 Modifier
@@ -487,15 +554,34 @@ fun EventCard(notification: AppNotification, onDismiss: () -> Unit) {
                     .background(color.copy(alpha = 0.14f), RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(icon, null, tint = color, modifier = Modifier.size(22.dp))
+                Icon(icon, null, tint = color, modifier = Modifier.size(20.dp))
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(notification.title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
-                Text(notification.message, fontSize = 12.sp, color = TextMuted)
-            }
-            IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.Close, null, tint = TextMuted, modifier = Modifier.size(16.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        displayType,
+                        fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextWhite
+                    )
+                    if (timeStr.isNotEmpty()) {
+                        Text(timeStr, fontSize = 11.sp, color = TextMuted)
+                    }
+                }
+                if (!event.message.isNullOrBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(event.message, fontSize = 12.sp, color = TextMuted)
+                }
+                if (event.id != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "#${event.id}",
+                        fontSize = 10.sp, color = TextMuted.copy(alpha = 0.5f)
+                    )
+                }
             }
         }
     }

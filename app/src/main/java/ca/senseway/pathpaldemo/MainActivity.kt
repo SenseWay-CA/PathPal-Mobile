@@ -1,11 +1,17 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
 package ca.senseway.pathpaldemo
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -57,8 +63,9 @@ class MainActivity : ComponentActivity() {
                 ) { loggedIn ->
                     if (loggedIn) MainApp(viewModel = viewModel)
                     else          LoginScreen(
-                        onLogin    = viewModel::login,
-                        loginError = viewModel.loginError
+                        onLogin        = viewModel::login,
+                        loginError     = viewModel.loginError,
+                        isLoginLoading = viewModel.isLoginLoading
                     )
                 }
             }
@@ -86,6 +93,21 @@ class MainActivity : ComponentActivity() {
 fun MainApp(viewModel: AppViewModel) {
     var currentTab   by remember { mutableIntStateOf(0) }
     var showUserMenu by remember { mutableStateOf(false) }
+
+    // Request POST_NOTIFICATIONS permission on Android 13+
+    if (Build.VERSION.SDK_INT >= 33) {
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        val notifLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { /* result not needed — we silently fail-safe in NotificationHelper */ }
+        LaunchedEffect(Unit) {
+            if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     Box(
         Modifier
@@ -172,12 +194,25 @@ fun MainApp(viewModel: AppViewModel) {
                                     ),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text("A", fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White)
+                                Text(
+                                    viewModel.displayInitial,
+                                    fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White
+                                )
                             }
                             Spacer(Modifier.width(12.dp))
                             Column {
-                                Text("admin", fontWeight = FontWeight.Bold, color = TextWhite, fontSize = 16.sp)
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    viewModel.displayName,
+                                    fontWeight = FontWeight.Bold, color = TextWhite, fontSize = 16.sp
+                                )
+                                Text(
+                                    viewModel.displayEmail,
+                                    fontSize = 12.sp, color = TextMuted
+                                )
+                                Row(
+                                    Modifier.padding(top = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Box(Modifier.size(7.dp).background(GreenOk, CircleShape))
                                     Spacer(Modifier.width(5.dp))
                                     Text("Online", fontSize = 12.sp, color = GreenOk)

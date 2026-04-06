@@ -11,8 +11,10 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -38,16 +40,19 @@ import androidx.lifecycle.LifecycleEventObserver
 import android.graphics.Bitmap as AndroidBitmap
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Paint as AndroidPaint
+import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import java.util.Locale
-import kotlin.math.sin
+import kotlinx.coroutines.delay
+import kotlin.math.*
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polygon
 
-// ── CartoDB Dark Matter tile source ─────────────────────────────────────────
+// CartoDB Dark Matter tile source
 private val CARTO_DARK_TILES = XYTileSource(
     "CartoDark", 0, 19, 256, ".png",
     arrayOf(
@@ -59,35 +64,49 @@ private val CARTO_DARK_TILES = XYTileSource(
     "© OpenStreetMap contributors © CARTO"
 )
 
-// ── Live GPS dot marker bitmap ───────────────────────────────────────────────
-private fun createLiveDotIcon(ctx: Context): BitmapDrawable {
-    val dp   = ctx.resources.displayMetrics.density
-    val size = (56 * dp).toInt()
-    val bmp  = AndroidBitmap.createBitmap(size, size, AndroidBitmap.Config.ARGB_8888)
+// Aim/crosshair marker for the live device position on the map
+private fun createAimMarkerIcon(ctx: Context): BitmapDrawable {
+    val dp     = ctx.resources.displayMetrics.density
+    val size   = (54 * dp).toInt()
+    val bmp    = AndroidBitmap.createBitmap(size, size, AndroidBitmap.Config.ARGB_8888)
     val canvas = AndroidCanvas(bmp)
     val paint  = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG)
-    val cx = size / 2f;  val cy = size / 2f
+    val cx     = size / 2f
+    val cy     = size / 2f
+    val outer  = cx - 2f * dp
 
-    paint.color = android.graphics.Color.argb(35, 78, 142, 243)
-    canvas.drawCircle(cx, cy, cx - 1f, paint)
+    // Soft outer glow
+    paint.color = android.graphics.Color.argb(28, 78, 142, 243)
+    canvas.drawCircle(cx, cy, outer, paint)
 
+    // Outer ring
     paint.style = AndroidPaint.Style.STROKE
-    paint.strokeWidth = 1.5f * dp
-    paint.color = android.graphics.Color.argb(85, 78, 142, 243)
-    canvas.drawCircle(cx, cy, cx - 2f, paint)
-    paint.style = AndroidPaint.Style.FILL
+    paint.strokeWidth = 2f * dp
+    paint.color = android.graphics.Color.argb(210, 78, 142, 243)
+    canvas.drawCircle(cx, cy, outer * 0.86f, paint)
 
+    // Four crosshair lines with a gap around the center
+    paint.strokeCap = android.graphics.Paint.Cap.ROUND
+    paint.strokeWidth = 2f * dp
+    paint.color = android.graphics.Color.argb(210, 78, 142, 243)
+    val lineOuter = outer * 0.68f
+    val lineInner = outer * 0.28f
+    canvas.drawLine(cx, cy - lineOuter, cx, cy - lineInner, paint)
+    canvas.drawLine(cx, cy + lineInner, cx, cy + lineOuter, paint)
+    canvas.drawLine(cx - lineOuter, cy, cx - lineInner, cy, paint)
+    canvas.drawLine(cx + lineInner, cy, cx + lineOuter, cy, paint)
+
+    // Center dot
+    paint.style = AndroidPaint.Style.FILL
     paint.color = android.graphics.Color.WHITE
-    canvas.drawCircle(cx, cy, 14f * dp, paint)
+    canvas.drawCircle(cx, cy, 5.5f * dp, paint)
     paint.color = android.graphics.Color.argb(255, 78, 142, 243)
-    canvas.drawCircle(cx, cy, 11f * dp, paint)
-    paint.color = android.graphics.Color.WHITE
-    canvas.drawCircle(cx, cy, 3.8f * dp, paint)
+    canvas.drawCircle(cx, cy, 4f * dp, paint)
 
     return BitmapDrawable(ctx.resources, bmp)
 }
 
-// ── Weather helper functions ─────────────────────────────────────────────────
+// Weather helper functions
 fun weatherDescription(code: Int): String = when {
     code == 0          -> "Clear sky"
     code in 1..2       -> "Partly cloudy"
@@ -137,7 +156,7 @@ fun temperatureColor(temp: Double): Color = when {
     else        -> Color(0xFF80CFFF)
 }
 
-// ── Weather ambient particle effect (snow / rain) ────────────────────────────
+// Weather ambient particle effect (snow / rain)
 private data class WeatherParticle(
     val x: Float,       // 0..1 normalised start x
     val phase: Float,   // 0..1 timing phase offset
@@ -224,7 +243,193 @@ fun WeatherParticleEffect(
     }
 }
 
-// ── DashboardScreen ──────────────────────────────────────────────────────────
+// Category accent color for a geofence by its name
+private fun fenceCategoryColor(name: String): Int {
+    val n = name.lowercase()
+    return when {
+        n.contains("home") || n.contains("house")                       -> android.graphics.Color.argb(255, 34, 197, 94)
+        n.contains("work") || n.contains("office") || n.contains("job") -> android.graphics.Color.argb(255, 165, 85, 244)
+        n.contains("school") || n.contains("uni") || n.contains("college") -> android.graphics.Color.argb(255, 245, 158, 11)
+        n.contains("gym") || n.contains("fitness") || n.contains("sport") -> android.graphics.Color.argb(255, 239, 68, 68)
+        n.contains("shop") || n.contains("store") || n.contains("mall")  -> android.graphics.Color.argb(255, 251, 146, 60)
+        n.contains("hospital") || n.contains("clinic") || n.contains("doctor") -> android.graphics.Color.argb(255, 239, 68, 68)
+        n.contains("park") || n.contains("garden")                       -> android.graphics.Color.argb(255, 74, 222, 128)
+        n.contains("cafe") || n.contains("coffee") || n.contains("restaurant") -> android.graphics.Color.argb(255, 251, 191, 36)
+        else -> android.graphics.Color.argb(255, 78, 142, 243)
+    }
+}
+
+// Clean circular icon marker for a geofence center (tap to reveal name)
+private fun createFenceIconMarker(ctx: Context, name: String): BitmapDrawable {
+    val dp       = ctx.resources.displayMetrics.density
+    val size     = (50 * dp).toInt()
+    val bmp      = AndroidBitmap.createBitmap(size, size, AndroidBitmap.Config.ARGB_8888)
+    val canvas   = AndroidCanvas(bmp)
+    val paint    = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG)
+    val cx       = size / 2f
+    val cy       = size / 2f
+    val circleR  = cx - 3f * dp
+    val catColor = fenceCategoryColor(name)
+    val cr = android.graphics.Color.red(catColor)
+    val cg = android.graphics.Color.green(catColor)
+    val cb = android.graphics.Color.blue(catColor)
+
+    // Soft outer glow
+    paint.style = AndroidPaint.Style.FILL
+    paint.color = android.graphics.Color.argb(28, cr, cg, cb)
+    canvas.drawCircle(cx, cy, circleR + 4f * dp, paint)
+
+    // Filled circle background
+    paint.color = android.graphics.Color.argb(225, cr, cg, cb)
+    canvas.drawCircle(cx, cy, circleR, paint)
+
+    // Inner lighter ring for depth
+    paint.style       = AndroidPaint.Style.STROKE
+    paint.strokeWidth = 1.5f * dp
+    paint.color       = android.graphics.Color.argb(90, 255, 255, 255)
+    canvas.drawCircle(cx, cy, circleR - 1.5f * dp, paint)
+
+    // White vector icon
+    paint.style       = AndroidPaint.Style.FILL
+    paint.strokeWidth = 1.8f * dp
+    paint.color       = android.graphics.Color.WHITE
+    drawFenceCategoryIcon(canvas, paint, dp, name, cx, cy, circleR * 0.48f)
+
+    return BitmapDrawable(ctx.resources, bmp)
+}
+
+// Draws a simple geometric white icon for the geofence category
+private fun drawFenceCategoryIcon(
+    canvas: AndroidCanvas,
+    paint:  AndroidPaint,
+    dp:     Float,
+    name:   String,
+    cx: Float, cy: Float, r: Float
+) {
+    val n = name.lowercase(Locale.ROOT)
+    when {
+        // House
+        n.contains("home") || n.contains("house") -> {
+            val roof = android.graphics.Path().apply {
+                moveTo(cx, cy - r)
+                lineTo(cx + r, cy - r * 0.12f)
+                lineTo(cx - r, cy - r * 0.12f)
+                close()
+            }
+            canvas.drawPath(roof, paint)
+            canvas.drawRect(cx - r * 0.60f, cy - r * 0.12f, cx + r * 0.60f, cy + r, paint)
+        }
+        // Office building
+        n.contains("work") || n.contains("office") || n.contains("job") -> {
+            canvas.drawRect(cx - r * 0.65f, cy - r, cx + r * 0.65f, cy + r, paint)
+            // Dark window cut-outs
+            paint.color = android.graphics.Color.argb(180, 10, 12, 22)
+            val wW = r * 0.22f; val wH = r * 0.24f
+            canvas.drawRect(cx - r * 0.38f, cy - r * 0.80f, cx - r * 0.38f + wW, cy - r * 0.80f + wH, paint)
+            canvas.drawRect(cx + r * 0.16f, cy - r * 0.80f, cx + r * 0.16f + wW, cy - r * 0.80f + wH, paint)
+            canvas.drawRect(cx - r * 0.38f, cy - r * 0.38f, cx - r * 0.38f + wW, cy - r * 0.38f + wH, paint)
+            canvas.drawRect(cx + r * 0.16f, cy - r * 0.38f, cx + r * 0.16f + wW, cy - r * 0.38f + wH, paint)
+            paint.color = android.graphics.Color.WHITE
+        }
+        // School / education
+        n.contains("school") || n.contains("uni") || n.contains("college") -> {
+            // Mortarboard: flat brim + box cap body
+            canvas.drawRect(cx - r, cy - r * 0.18f, cx + r, cy + r * 0.18f, paint)
+            canvas.drawRect(cx - r * 0.52f, cy - r, cx + r * 0.52f, cy - r * 0.18f, paint)
+            // Tassel
+            paint.style       = AndroidPaint.Style.STROKE
+            paint.strokeWidth = 1.6f * dp
+            canvas.drawLine(cx + r * 0.42f, cy + r * 0.18f, cx + r * 0.42f, cy + r * 0.72f, paint)
+            paint.style = AndroidPaint.Style.FILL
+            canvas.drawCircle(cx + r * 0.42f, cy + r * 0.75f, r * 0.14f, paint)
+        }
+        // Gym / fitness
+        n.contains("gym") || n.contains("fitness") || n.contains("sport") -> {
+            // Dumbbell: centre bar + end weights
+            canvas.drawRect(cx - r, cy - r * 0.16f, cx + r, cy + r * 0.16f, paint)
+            canvas.drawRoundRect(RectF(cx - r, cy - r * 0.58f, cx - r * 0.54f, cy + r * 0.58f), r * 0.14f, r * 0.14f, paint)
+            canvas.drawRoundRect(RectF(cx + r * 0.54f, cy - r * 0.58f, cx + r, cy + r * 0.58f), r * 0.14f, r * 0.14f, paint)
+        }
+        // Medical
+        n.contains("hospital") || n.contains("clinic") || n.contains("doctor") -> {
+            val arm = r * 0.28f
+            canvas.drawRect(cx - arm, cy - r, cx + arm, cy + r, paint)
+            canvas.drawRect(cx - r, cy - arm, cx + r, cy + arm, paint)
+        }
+        // Shopping
+        n.contains("shop") || n.contains("store") || n.contains("mall") -> {
+            val bag = android.graphics.Path().apply {
+                moveTo(cx - r * 0.78f, cy - r * 0.18f)
+                lineTo(cx + r * 0.78f, cy - r * 0.18f)
+                lineTo(cx + r * 0.58f, cy + r)
+                lineTo(cx - r * 0.58f, cy + r)
+                close()
+            }
+            canvas.drawPath(bag, paint)
+            // Handle arc
+            paint.style       = AndroidPaint.Style.STROKE
+            paint.strokeWidth = r * 0.22f
+            canvas.drawArc(
+                RectF(cx - r * 0.40f, cy - r, cx + r * 0.40f, cy - r * 0.18f + r * 0.12f),
+                180f, 180f, false, paint
+            )
+            paint.style = AndroidPaint.Style.FILL
+        }
+        // Park / nature
+        n.contains("park") || n.contains("garden") -> {
+            canvas.drawCircle(cx, cy - r * 0.18f, r * 0.72f, paint)
+            canvas.drawRect(cx - r * 0.13f, cy + r * 0.42f, cx + r * 0.13f, cy + r, paint)
+        }
+        // Cafe / food
+        n.contains("cafe") || n.contains("coffee") || n.contains("restaurant") || n.contains("food") -> {
+            canvas.drawRoundRect(RectF(cx - r * 0.62f, cy - r * 0.28f, cx + r * 0.62f, cy + r), r * 0.15f, r * 0.15f, paint)
+            paint.style       = AndroidPaint.Style.STROKE
+            paint.strokeWidth = r * 0.22f
+            canvas.drawArc(
+                RectF(cx + r * 0.38f, cy - r * 0.12f, cx + r, cy + r * 0.65f),
+                -75f, 195f, false, paint
+            )
+            paint.style = AndroidPaint.Style.FILL
+        }
+        // Default: location pin (circle + teardrop tip)
+        else -> {
+            canvas.drawCircle(cx, cy - r * 0.18f, r * 0.68f, paint)
+            val tip = android.graphics.Path().apply {
+                moveTo(cx - r * 0.28f, cy + r * 0.36f)
+                lineTo(cx + r * 0.28f, cy + r * 0.36f)
+                lineTo(cx, cy + r)
+                close()
+            }
+            canvas.drawPath(tip, paint)
+        }
+    }
+}
+
+// Geofence circle polygon (approximated as 72-point polygon)
+private fun createGeofencePolygon(fence: GeofenceDto): Polygon? {
+    val lat    = fence.latitude  ?: return null
+    val lon    = fence.longitude ?: return null
+    val radius = fence.radius    ?: return null
+    val steps  = 72
+    val points = ArrayList<GeoPoint>(steps)
+    for (i in 0 until steps) {
+        val angle    = 2.0 * PI * i / steps
+        val deltaLat = radius / 111_320.0 * cos(angle)
+        val deltaLon = radius / (111_320.0 * cos(Math.toRadians(lat))) * sin(angle)
+        points.add(GeoPoint(lat + deltaLat, lon + deltaLon))
+    }
+    return Polygon().apply {
+        setPoints(points)
+        fillPaint.color  = android.graphics.Color.argb(38,  78, 142, 243)
+        fillPaint.style  = android.graphics.Paint.Style.FILL
+        outlinePaint.color       = android.graphics.Color.argb(200, 78, 142, 243)
+        outlinePaint.strokeWidth = 4f
+        outlinePaint.style       = android.graphics.Paint.Style.STROKE
+        title = fence.name ?: "Geofence"
+    }
+}
+
+// DashboardScreen
 @Composable
 fun DashboardScreen(viewModel: AppViewModel) {
     val sheetState = rememberBottomSheetScaffoldState(
@@ -233,7 +438,15 @@ fun DashboardScreen(viewModel: AppViewModel) {
             skipHiddenState = true
         )
     )
-    var mapViewRef by remember { mutableStateOf<MapView?>(null) }
+    var mapViewRef        by remember { mutableStateOf<MapView?>(null) }
+    var selectedFenceName by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(selectedFenceName) {
+        if (selectedFenceName != null) {
+            delay(3_000)
+            selectedFenceName = null
+        }
+    }
 
     BottomSheetScaffold(
         scaffoldState    = sheetState,
@@ -257,13 +470,48 @@ fun DashboardScreen(viewModel: AppViewModel) {
         Box(Modifier.fillMaxSize()) {
             if (viewModel.latitude != 0.0 && viewModel.longitude != 0.0) {
                 OsmFullMap(
-                    latitude     = viewModel.latitude,
-                    longitude    = viewModel.longitude,
-                    onMapCreated = { mapViewRef = it }
+                    latitude        = viewModel.latitude,
+                    longitude       = viewModel.longitude,
+                    geofences       = viewModel.geofences,
+                    showGeofences   = viewModel.showGeofencesOnMap,
+                    onFenceSelected = { selectedFenceName = it },
+                    onMapCreated    = { mapViewRef = it }
                 )
                 LiveLocationOverlay(modifier = Modifier.align(Alignment.Center))
             } else {
                 GpsAcquiringScreen()
+            }
+
+            // Fence name popup — appears on marker tap, auto-dismisses after 3 s
+            AnimatedVisibility(
+                visible  = selectedFenceName != null,
+                enter    = fadeIn(tween(180)) + slideInVertically { -it / 2 },
+                exit     = fadeOut(tween(180)) + slideOutVertically { -it / 2 },
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 60.dp)
+            ) {
+                selectedFenceName?.let { fname ->
+                    Surface(
+                        shape           = RoundedCornerShape(22.dp),
+                        color           = PanelPurple.copy(alpha = 0.96f),
+                        border          = BorderStroke(1.dp, CardBorder),
+                        shadowElevation = 10.dp
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 16.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.LocationOn, null,
+                                tint     = ElectricBlue,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(Modifier.width(7.dp))
+                            Text(fname, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
+                        }
+                    }
+                }
             }
 
             // Ambient weather particles — subtle overlay on top of the map
@@ -320,13 +568,22 @@ fun DashboardScreen(viewModel: AppViewModel) {
                             GeoPoint(viewModel.latitude, viewModel.longitude)
                         )
                     }
+                    MapFab(
+                        icon        = if (viewModel.showGeofencesOnMap) Icons.Default.Visibility
+                                      else Icons.Default.VisibilityOff,
+                        contentDesc = if (viewModel.showGeofencesOnMap) "Hide geofences"
+                                      else "Show geofences",
+                        iconTint    = if (viewModel.showGeofencesOnMap) ElectricBlue else TextMuted
+                    ) {
+                        viewModel.toggleGeofenceVisibility()
+                    }
                 }
             }
         }
     }
 }
 
-// ── Bottom sheet content — tabbed ────────────────────────────────────────────
+// Bottom sheet content — tabbed
 @Composable
 fun DashboardSheetContent(viewModel: AppViewModel) {
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -393,12 +650,13 @@ fun DashboardSheetContent(viewModel: AppViewModel) {
     }
 }
 
-// ── Overview panel (metrics) ─────────────────────────────────────────────────
+// Overview panel (metrics)
 @Composable
 fun DashboardOverviewPanel(viewModel: AppViewModel) {
     Column(
         Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
             .padding(bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -414,7 +672,7 @@ fun DashboardOverviewPanel(viewModel: AppViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     PulsingOnlineDot()
                     Spacer(Modifier.width(6.dp))
-                    Text("Online  •  Live tracking", fontSize = 13.sp, color = TextMuted)
+                    Text("${viewModel.displayName}  •  Live tracking", fontSize = 13.sp, color = TextMuted)
                 }
             }
             Surface(
@@ -475,16 +733,77 @@ fun DashboardOverviewPanel(viewModel: AppViewModel) {
         if (viewModel.latitude != 0.0 && viewModel.longitude != 0.0) {
             GpsLocationCard(viewModel.latitude, viewModel.longitude)
         }
+
+        GeofenceMiniCard(
+            isWithin      = viewModel.isWithinGeofence,
+            geofenceCount = viewModel.geofences.size
+        )
+
         Spacer(Modifier.height(4.dp))
     }
 }
 
-// ── Alerts panel ─────────────────────────────────────────────────────────────
+@Composable
+fun GeofenceMiniCard(isWithin: Boolean, geofenceCount: Int) {
+    val color = when {
+        geofenceCount == 0 -> TextMuted
+        isWithin           -> GreenOk
+        else               -> RedAlert
+    }
+    val icon = when {
+        geofenceCount == 0 -> Icons.Default.LocationOff
+        isWithin           -> Icons.Default.GpsFixed
+        else               -> Icons.Default.Warning
+    }
+    val label = when {
+        geofenceCount == 0 -> "No safety zones configured"
+        isWithin           -> "Within ${geofenceCount} active zone${if (geofenceCount > 1) "s" else ""}"
+        else               -> "Outside defined boundaries"
+    }
+
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape  = RoundedCornerShape(16.dp),
+        color  = color.copy(alpha = 0.07f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.25f))
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .size(34.dp)
+                    .background(color.copy(alpha = 0.14f), RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, null, tint = color, modifier = Modifier.size(17.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "SAFETY ZONE",
+                    fontSize = 9.sp, color = color,
+                    fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp
+                )
+                Text(label, fontSize = 13.sp, color = TextWhite, fontWeight = FontWeight.SemiBold)
+            }
+            if (geofenceCount > 0) {
+                Canvas(Modifier.size(9.dp)) {
+                    drawCircle(color, size.minDimension / 2)
+                }
+            }
+        }
+    }
+}
+
+// Alerts panel
 @Composable
 fun DashboardAlertsPanel(viewModel: AppViewModel) {
     Column(
         Modifier
             .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
             .padding(bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -500,14 +819,17 @@ fun DashboardAlertsPanel(viewModel: AppViewModel) {
             }
         }
 
-        // Geofence status card (always visible)
-        GeofenceStatusCard(viewModel.isWithinGeofence)
+        // Geofence status card
+        GeofenceStatusCard(
+            isWithin      = viewModel.isWithinGeofence,
+            geofenceCount = viewModel.geofences.size
+        )
 
         Spacer(Modifier.height(4.dp))
     }
 }
 
-// ── Weather summary card ─────────────────────────────────────────────────────
+// Weather summary card
 @Composable
 fun WeatherSummaryCard(viewModel: AppViewModel) {
     val tint = weatherTint(viewModel.weatherCode)
@@ -575,7 +897,7 @@ fun WeatherStatChip(icon: ImageVector, value: String, color: Color, label: Strin
     }
 }
 
-// ── Individual alert card ────────────────────────────────────────────────────
+// Individual alert card
 @Composable
 fun WeatherAlertCard(alert: WeatherAlert) {
     val (color, icon) = when (alert.severity) {
@@ -614,15 +936,48 @@ fun WeatherAlertCard(alert: WeatherAlert) {
     }
 }
 
-// ── Geofence status card ─────────────────────────────────────────────────────
+// Geofence status card
 @Composable
-fun GeofenceStatusCard(isWithin: Boolean) {
+fun GeofenceStatusCard(isWithin: Boolean, geofenceCount: Int) {
+    // No geofences configured yet — show an informational card
+    if (geofenceCount == 0) {
+        Surface(
+            Modifier.fillMaxWidth(),
+            shape  = RoundedCornerShape(16.dp),
+            color  = TextMuted.copy(alpha = 0.06f),
+            border = BorderStroke(1.dp, CardBorder)
+        ) {
+            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(36.dp)
+                        .background(TextMuted.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.LocationOff, null, tint = TextMuted, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "GEOFENCE",
+                        fontSize = 9.sp, color = TextMuted,
+                        fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp
+                    )
+                    Text("No geofences configured", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
+                    Spacer(Modifier.height(2.dp))
+                    Text("Add geofences via the Senseway web portal.", fontSize = 12.sp, color = TextMuted)
+                }
+            }
+        }
+        return
+    }
+
     val color = if (isWithin) GreenOk else RedAlert
     val title = if (isWithin) "Within geofenced limits" else "Outside geofenced limits"
     val desc  = if (isWithin)
-        "User is within geofenced limits. All monitored zones are clear."
+        "$geofenceCount active zone${if (geofenceCount > 1) "s" else ""}. Device is within boundaries."
     else
-        "User is outside defined boundaries. Alert has been dispatched."
+        "Device is outside defined boundaries. Caregiver has been notified."
 
     Surface(
         Modifier.fillMaxWidth(),
@@ -644,20 +999,18 @@ fun GeofenceStatusCard(isWithin: Boolean) {
                 Text(
                     "GEOFENCE",
                     fontSize = 9.sp, color = color,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp
+                    fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp
                 )
                 Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
                 Spacer(Modifier.height(2.dp))
                 Text(desc, fontSize = 12.sp, color = TextMuted)
             }
-            // Live status dot
             PulsingOnlineDot()
         }
     }
 }
 
-// ── Weather loading placeholder ───────────────────────────────────────────────
+// Weather loading placeholder
 @Composable
 fun WeatherLoadingCard() {
     val t = rememberInfiniteTransition(label = "wl")
@@ -687,7 +1040,7 @@ fun WeatherLoadingCard() {
     }
 }
 
-// ── Map composables ───────────────────────────────────────────────────────────
+// Map composables
 @Composable
 fun MapFab(
     icon:        ImageVector,
@@ -749,15 +1102,20 @@ fun GpsAcquiringScreen() {
 
 @Composable
 fun OsmFullMap(
-    latitude:     Double,
-    longitude:    Double,
-    onMapCreated: (MapView) -> Unit = {}
+    latitude:        Double,
+    longitude:       Double,
+    geofences:       List<GeofenceDto>,
+    showGeofences:   Boolean,
+    onFenceSelected: (String) -> Unit = {},
+    onMapCreated:    (MapView) -> Unit = {}
 ) {
-    val mapRef  = remember { mutableStateOf<MapView?>(null) }
-    val context = LocalContext.current
+    val mapRef            = remember { mutableStateOf<MapView?>(null) }
+    val geofencePolygons  = remember { mutableListOf<Polygon>() }
+    val geofenceMarkers   = remember { mutableListOf<Marker>() }
+    val context           = LocalContext.current
 
-    // Properly pause/resume the osmdroid MapView with the Activity lifecycle.
-    // Without this, tile downloads continue when the app is backgrounded.
+    // Pause/resume the osmdroid MapView with the Activity lifecycle so tile
+    // downloads stop when the app is backgrounded.
     DisposableEffect(Unit) {
         val activity = context as? ComponentActivity
         val observer = LifecycleEventObserver { _, event ->
@@ -785,21 +1143,59 @@ fun OsmFullMap(
                 controller.setCenter(GeoPoint(latitude, longitude))
                 isTilesScaledToDpi = true
                 setBackgroundColor(android.graphics.Color.parseColor("#06060F"))
-                val marker = Marker(this).apply {
-                    position = GeoPoint(latitude, longitude)
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                    icon     = createLiveDotIcon(ctx)
-                    title    = null
-                }
-                overlays.add(marker)
+                overlays.add(
+                    Marker(this).apply {
+                        position = GeoPoint(latitude, longitude)
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        icon  = createAimMarkerIcon(ctx)
+                        title = null
+                    }
+                )
                 mapRef.value = this
                 onMapCreated(this)
             }
         },
         update = { mapView ->
+            // Move aim marker to latest GPS position
             mapView.controller.animateTo(GeoPoint(latitude, longitude))
-            mapView.overlays.filterIsInstance<Marker>().firstOrNull()
+            mapView.overlays.filterIsInstance<Marker>()
+                .firstOrNull { it.title == null }
                 ?.position = GeoPoint(latitude, longitude)
+
+            // Remove previous geofence overlays
+            geofencePolygons.forEach { mapView.overlays.remove(it) }
+            geofenceMarkers.forEach  { mapView.overlays.remove(it) }
+            geofencePolygons.clear()
+            geofenceMarkers.clear()
+
+            // Redraw geofence circles and name labels when visibility is on
+            if (showGeofences) {
+                geofences.filter { it.enabled == true }.forEach { fence ->
+                    val fLat = fence.latitude  ?: return@forEach
+                    val fLon = fence.longitude ?: return@forEach
+                    val name = fence.name      ?: "Zone"
+
+                    createGeofencePolygon(fence)?.let { poly ->
+                        geofencePolygons.add(poly)
+                        mapView.overlays.add(0, poly)
+                    }
+
+                    // Category icon at fence center — tap shows name
+                    val labelMarker = Marker(mapView).apply {
+                        position = GeoPoint(fLat, fLon)
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        icon  = createFenceIconMarker(mapView.context, name)
+                        title = null
+                        setOnMarkerClickListener { _, _ ->
+                            onFenceSelected(name)
+                            true
+                        }
+                    }
+                    geofenceMarkers.add(labelMarker)
+                    mapView.overlays.add(labelMarker)
+                }
+            }
+
             mapView.invalidate()
         }
     )
@@ -846,7 +1242,7 @@ fun LiveLocationOverlay(modifier: Modifier = Modifier) {
     }
 }
 
-// ── Shared small composables ──────────────────────────────────────────────────
+// Shared small composables
 enum class MetricAnim { HEARTBEAT, SPIN, BOB, GLOW }
 
 @Composable
