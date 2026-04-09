@@ -1,9 +1,13 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
 package ca.senseway.pathpaldemo
 
+import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,8 +22,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -31,6 +37,14 @@ import java.time.Duration
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
+import org.json.JSONObject
 
 @Composable
 fun StatsScreen(viewModel: AppViewModel) {
@@ -75,7 +89,7 @@ fun StatsScreen(viewModel: AppViewModel) {
             contentColor = ElectricBlue,
             divider = { HorizontalDivider(color = CardBorder) }
         ) {
-            listOf("Sensors", "Events").forEachIndexed { index, title ->
+            listOf("Sensors", "Events", "Camera").forEachIndexed { index, title ->
                 Tab(
                     selected = selectedTab == index,
                     onClick = { selectedTab = index },
@@ -93,6 +107,7 @@ fun StatsScreen(viewModel: AppViewModel) {
         when (selectedTab) {
             0 -> SensorsTab(viewModel)
             1 -> EventsTab(viewModel)
+            2 -> CameraTab()
         }
     }
 }
@@ -525,6 +540,226 @@ fun EventsTab(viewModel: AppViewModel) {
             }
             item { Spacer(Modifier.height(80.dp)) }
         }
+    }
+}
+
+// ── Camera Tab ──────────────────────────────────────────────────────────────
+
+private const val STREAM_BASE    = "https://api.senseway.ca"
+private const val STREAM_STATUS  = "$STREAM_BASE/stream/status"
+private const val STREAM_WS      = "wss://api.senseway.ca/ws/stream"
+
+@Composable
+fun CameraTab() {
+    var streaming       by remember { mutableStateOf(false) }
+    var viewers         by remember { mutableIntStateOf(0) }
+    var frameBitmap     by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var connectionLabel by remember { mutableStateOf("Connecting...") }
+
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    // One-shot status fetch so the UI isn't blank before the WS handshakes
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            try {
+                val req = Request.Builder().url(STREAM_STATUS).build()
+                sensewayHttpClient.newCall(req).execute().use { resp ->
+                    resp.body?.string()?.let { body ->
+                        val json = JSONObject(body)
+                        val s = json.optBoolean("streaming", false)
+                        val c = json.optInt("clients", 0)
+                        withContext(Dispatchers.Main) {
+                            streaming = s
+                            viewers   = c
+                            if (connectionLabel == "Connecting...") {
+                                connectionLabel = if (s) "Live" else "Offline"
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    // WebSocket lifecycle — self-reconnects on close/failure
+    DisposableEffect(Unit) {
+        var cancelled = false
+        var currentWs: WebSocket? = null
+        var reconnectRunnable: Runnable? = null
+
+        fun connect() {
+            if (cancelled) return
+            val request = Request.Builder().url(STREAM_WS).build()
+            currentWs = sensewayHttpClient.newWebSocket(request, object : WebSocketListener() {
+
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    mainHandler.post {
+                        if (!cancelled && connectionLabel == "Connecting...")
+                            connectionLabel = "Connected"
+                    }
+                }
+
+                // Binary frame = raw JPEG
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    if (cancelled) return
+                    val arr = bytes.toByteArray()
+                    val bmp = BitmapFactory.decodeByteArray(arr, 0, arr.size) ?: return
+                    mainHandler.post { if (!cancelled) frameBitmap = bmp }
+                }
+
+                // Text frame = JSON status update
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (cancelled) return
+                    try {
+                        val json = JSONObject(text)
+                        val s = json.optBoolean("streaming", false)
+                        val c = json.optInt("clients", 0)
+                        mainHandler.post {
+                            if (!cancelled) {
+                                streaming       = s
+                                viewers         = c
+                                connectionLabel = if (s) "Live" else "Offline"
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                private fun scheduleReconnect() {
+                    if (cancelled) return
+                    mainHandler.post { if (!cancelled) connectionLabel = "Reconnecting..." }
+                    val r = Runnable { connect() }
+                    reconnectRunnable = r
+                    mainHandler.postDelayed(r, 3000L)
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) =
+                    scheduleReconnect()
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) =
+                    scheduleReconnect()
+            })
+        }
+
+        connect()
+
+        onDispose {
+            cancelled = true
+            reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+            currentWs?.cancel()
+        }
+    }
+
+    // ── UI ──────────────────────────────────────────────────────────────────
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(BgDeep)
+    ) {
+
+        // Status bar
+        Surface(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            shape  = RoundedCornerShape(14.dp),
+            color  = PanelPurple,
+            border = BorderStroke(1.dp, CardBorder)
+        ) {
+            Row(
+                Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .background(if (streaming) GreenOk else RedAlert, CircleShape)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    connectionLabel,
+                    fontSize     = 13.sp,
+                    fontWeight   = FontWeight.SemiBold,
+                    color        = when {
+                        streaming                         -> GreenOk
+                        connectionLabel == "Reconnecting..." -> YellowWarn
+                        else                              -> TextMuted
+                    }
+                )
+                Spacer(Modifier.weight(1f))
+                if (viewers > 0) {
+                    Icon(
+                        Icons.Default.Visibility, null,
+                        tint     = TextMuted,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("$viewers watching", fontSize = 11.sp, color = TextMuted)
+                }
+            }
+        }
+
+        // Camera frame area
+        Surface(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .weight(1f),
+            shape  = RoundedCornerShape(16.dp),
+            color  = Color.Black,
+            border = BorderStroke(1.dp, CardBorder)
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (frameBitmap != null) {
+                    Image(
+                        bitmap             = frameBitmap!!.asImageBitmap(),
+                        contentDescription = "Cane camera live feed",
+                        modifier           = Modifier.fillMaxSize(),
+                        contentScale       = ContentScale.Fit
+                    )
+                } else {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Box(
+                            Modifier
+                                .size(72.dp)
+                                .background(PanelPurple2, RoundedCornerShape(20.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Videocam, null,
+                                tint     = TextMuted,
+                                modifier = Modifier.size(36.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            when (connectionLabel) {
+                                "Reconnecting..." -> "Reconnecting..."
+                                "Offline"         -> "Camera Offline"
+                                else              -> "No Live Feed"
+                            },
+                            fontSize   = 16.sp,
+                            color      = TextGray,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            when (connectionLabel) {
+                                "Reconnecting..." -> "Attempting to reconnect..."
+                                "Offline"         -> "Pi camera is not streaming"
+                                else              -> "Waiting for stream..."
+                            },
+                            fontSize = 12.sp,
+                            color    = TextMuted
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(96.dp))
     }
 }
 
