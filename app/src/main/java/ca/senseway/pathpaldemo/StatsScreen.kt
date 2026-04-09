@@ -591,8 +591,8 @@ fun CameraTab() {
     val context            = LocalContext.current
     var ttsInstance        by remember { mutableStateOf<TextToSpeech?>(null) }
 
-    // cache interpreters so we only load from assets once
-    val interpHolder = remember { arrayOfNulls<Interpreter>(2) }
+    // cache yolo detector — loaded lazily on first inference
+    val detectorRef = remember { Array<YoloDetector?>(1) { null } }
 
     // one-shot status fetch before websocket connects
     LaunchedEffect(Unit) {
@@ -641,10 +641,7 @@ fun CameraTab() {
                     val arr = bytes.toByteArray()
                     val bmp = BitmapFactory.decodeByteArray(arr, 0, arr.size) ?: return
                     mainHandler.post {
-                        if (!cancelled) {
-                            frameBitmap?.recycle()  // free old frame memory
-                            frameBitmap = bmp
-                        }
+                        if (!cancelled) frameBitmap = bmp
                     }
                 }
 
@@ -813,7 +810,7 @@ fun CameraTab() {
         }
     }
 
-    // ml inference — every 3rd frame on background thread
+    // ml inference — every 3rd frame via YoloDetector
     LaunchedEffect(frameBitmap) {
         val bmp = frameBitmap ?: return@LaunchedEffect
         frameCounter++
@@ -821,83 +818,20 @@ fun CameraTab() {
 
         withContext(Dispatchers.Default) {
             try {
-                // load models lazily — cached after first load
-                if (interpHolder[0] == null)
-                    interpHolder[0] = loadInterpreter(context, "pathsense_pedestrian.tflite")
-                val interpreter = interpHolder[0] ?: return@withContext
-                if (interpHolder[1] == null)
-                    interpHolder[1] = loadInterpreter(context, "pathsense_traffic_light_state.tflite")
-                val tlInterpreter = interpHolder[1]
-
-                // resize to 640x640 and normalize pixels 0-1
-                val resized = android.graphics.Bitmap.createScaledBitmap(bmp, 640, 640, true)
-                val inputBuffer = ByteBuffer.allocateDirect(1 * 640 * 640 * 3 * 4)
-                inputBuffer.order(ByteOrder.nativeOrder())
-                for (py in 0 until 640) {
-                    for (px in 0 until 640) {
-                        val pixel = resized.getPixel(px, py)
-                        inputBuffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f)
-                        inputBuffer.putFloat(((pixel shr 8)  and 0xFF) / 255.0f)
-                        inputBuffer.putFloat(( pixel         and 0xFF) / 255.0f)
-                    }
-                }
-
-                // run yolo pedestrian + sign detection
-                val output = Array(1) { Array(8400) { FloatArray(10) } }
-                interpreter.run(inputBuffer, output)
-
-                val classThresholds = mapOf(
-                    0 to 0.85f,   // crosswalk
-                    1 to 0.88f,   // walk_signal
-                    2 to 0.88f,   // stop_signal
-                    3 to 0.82f,   // pedestrian_crossing_sign
-                    4 to 0.82f,   // school_crossing_sign
-                    5 to 0.80f    // traffic_light
-                )
-                val detections = parseYoloOutput(output[0], confThreshold = 0.80f, nmsThreshold = 0.45f)
-                val detectedClasses = detections
-                    .filter { it.confidence >= (classThresholds[it.classId] ?: 0.82f) }
-                    .map { it.classId }
-                    .toSet()
-
-                // traffic light classifier on cropped bounding box
-                var tlState = ""
-                if (5 in detectedClasses && tlInterpreter != null) {
-                    val tlDet = detections.firstOrNull { it.classId == 5 } ?: return@withContext
-                    val cropX = (tlDet.cx - tlDet.w / 2).coerceIn(0f, 1f)
-                    val cropY = (tlDet.cy - tlDet.h / 2).coerceIn(0f, 1f)
-                    val cropW = tlDet.w.coerceIn(0f, 1f - cropX)
-                    val cropH = tlDet.h.coerceIn(0f, 1f - cropY)
-                    val cropBmp = android.graphics.Bitmap.createBitmap(
-                        bmp,
-                        (cropX * bmp.width).toInt(),
-                        (cropY * bmp.height).toInt(),
-                        (cropW * bmp.width).toInt().coerceAtLeast(1),
-                        (cropH * bmp.height).toInt().coerceAtLeast(1)
+                // init detector lazily on first use
+                if (detectorRef[0] == null)
+                    detectorRef[0] = YoloDetector(
+                        context, "pathsense_pedestrian.tflite",
+                        labels = listOf(
+                            "crosswalk", "walk_signal", "stop_signal",
+                            "pedestrian_crossing_sign", "school_crossing_sign", "traffic_light"
+                        )
                     )
-                    val tlResized = android.graphics.Bitmap.createScaledBitmap(cropBmp, 96, 96, true)
-                    val tlBuffer = ByteBuffer.allocateDirect(1 * 96 * 96 * 3 * 4)
-                    tlBuffer.order(ByteOrder.nativeOrder())
-                    for (py in 0 until 96) {
-                        for (px in 0 until 96) {
-                            val pixel = tlResized.getPixel(px, py)
-                            tlBuffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f)
-                            tlBuffer.putFloat(((pixel shr 8)  and 0xFF) / 255.0f)
-                            tlBuffer.putFloat(( pixel         and 0xFF) / 255.0f)
-                        }
-                    }
-                    val tlOutput = Array(1) { FloatArray(3) }
-                    tlInterpreter.run(tlBuffer, tlOutput)
-                    val states = listOf("red", "yellow", "green")
-                    val maxIdx = tlOutput[0].indices.maxByOrNull { tlOutput[0][it] } ?: -1
-                    if (maxIdx >= 0 && tlOutput[0][maxIdx] >= 0.90f) {
-                        // needs 3 consecutive frames agreeing on same state
-                        val stateStr = states[maxIdx]
-                        if (stateStr == consecutiveTlState) consecutiveTlCount++
-                        else { consecutiveTlState = stateStr; consecutiveTlCount = 1 }
-                        if (consecutiveTlCount >= 3) tlState = stateStr
-                    }
-                }
+                val detector = detectorRef[0] ?: return@withContext
+
+                // run detection — YoloDetector handles resize + nms internally
+                val boxes = detector.detect(bmp)
+                val detectedClasses = boxes.map { it.classId }.toSet()
 
                 // track consecutive walk/stop frames for confirmation
                 if (1 in detectedClasses) consecutiveWalk++ else consecutiveWalk = 0
@@ -964,39 +898,6 @@ fun CameraTab() {
                             setType  = { detectionType = it },
                             setTime  = { lastDetectionTime = it })
                         chips.add("School Zone" to YellowWarn)
-                    }
-                    // priority 6: traffic light state
-                    when (tlState) {
-                        "red" -> {
-                            triggerDetection("tl_red",
-                                "Red light — Do not cross", "warning",
-                                "Red light.", urgent = true, cooldownMs = 6_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            chips.add("Red Light" to RedAlert)
-                        }
-                        "green" -> {
-                            triggerDetection("tl_green",
-                                "Green light", "safe",
-                                "Green light.", urgent = false, cooldownMs = 6_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            chips.add("Green Light" to GreenOk)
-                        }
-                        "yellow" -> {
-                            triggerDetection("tl_yellow",
-                                "Light is changing — Caution", "caution",
-                                "Light is changing. Caution.", urgent = false, cooldownMs = 6_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            chips.add("Yellow Light" to YellowWarn)
-                        }
                     }
                     if (chips.isNotEmpty()) activeChips = chips
                 }
@@ -1227,76 +1128,6 @@ fun CameraTab() {
 
         Spacer(Modifier.height(96.dp))
     }
-}
-
-// bounding box from yolo output row
-data class Detection(
-    val classId: Int,
-    val confidence: Float,
-    val cx: Float, val cy: Float,
-    val w: Float,  val h: Float
-)
-
-// parse raw yolo rows → detections, then nms filter
-private fun parseYoloOutput(
-    output: Array<FloatArray>,
-    confThreshold: Float,
-    nmsThreshold: Float
-): List<Detection> {
-    val raw = mutableListOf<Detection>()
-    for (row in output) {
-        val conf = row[4]
-        if (conf < confThreshold) continue
-        val classScores = row.drop(5)
-        val classId = classScores.indices.maxByOrNull { classScores[it] } ?: continue
-        val classConf = conf * classScores[classId]
-        if (classConf < confThreshold) continue
-        raw.add(Detection(classId, classConf, row[0], row[1], row[2], row[3]))
-    }
-    return applyNms(raw, nmsThreshold)
-}
-
-// keep highest confidence boxes, suppress overlapping ones
-private fun applyNms(detections: List<Detection>, iouThreshold: Float): List<Detection> {
-    val sorted = detections.sortedByDescending { it.confidence }.toMutableList()
-    val result = mutableListOf<Detection>()
-    while (sorted.isNotEmpty()) {
-        val best = sorted.removeAt(0)
-        result.add(best)
-        sorted.removeAll { iou(best, it) > iouThreshold }
-    }
-    return result
-}
-
-// intersection over union between two boxes
-private fun iou(a: Detection, b: Detection): Float {
-    val ax1 = a.cx - a.w / 2; val ay1 = a.cy - a.h / 2
-    val ax2 = a.cx + a.w / 2; val ay2 = a.cy + a.h / 2
-    val bx1 = b.cx - b.w / 2; val by1 = b.cy - b.h / 2
-    val bx2 = b.cx + b.w / 2; val by2 = b.cy + b.h / 2
-    val ix1 = maxOf(ax1, bx1); val iy1 = maxOf(ay1, by1)
-    val ix2 = minOf(ax2, bx2); val iy2 = minOf(ay2, by2)
-    val inter = maxOf(0f, ix2 - ix1) * maxOf(0f, iy2 - iy1)
-    val union = a.w * a.h + b.w * b.h - inter
-    return if (union <= 0f) 0f else inter / union
-}
-
-// memory-map tflite model from assets — null if file missing
-private fun loadInterpreter(context: Context, modelName: String): Interpreter? {
-    return try {
-        val afd = context.assets.openFd(modelName)
-        val fis = FileInputStream(afd.fileDescriptor)
-        val buffer = fis.channel.map(
-            FileChannel.MapMode.READ_ONLY,
-            afd.startOffset,
-            afd.declaredLength
-        )
-        val options = Interpreter.Options().apply {
-            setNumThreads(4)
-            setUseXNNPACK(true)
-        }
-        Interpreter(buffer, options)
-    } catch (_: Exception) { null }
 }
 
 // speak phrase only if cooldown has elapsed for this key
