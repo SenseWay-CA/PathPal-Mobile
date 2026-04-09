@@ -40,9 +40,17 @@ android {
     buildFeatures {
         compose = true
     }
+    aaptOptions {
+        noCompress("tflite")
+    }
 }
 
 dependencies {
+    // TFLite — on-device ML inference for PathSense
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+
     // Retrofit + OkHttp (cookie jar for session auth)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.retrofit2:retrofit:2.11.0")

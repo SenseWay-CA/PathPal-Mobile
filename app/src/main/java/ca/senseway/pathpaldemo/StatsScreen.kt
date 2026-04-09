@@ -45,6 +45,20 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
+import android.content.Context
+import android.speech.tts.TextToSpeech
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.support.image.TensorImage
+import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.ops.ResizeOp
+import org.tensorflow.lite.support.common.ops.NormalizeOp
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.io.FileInputStream
+import java.nio.channels.FileChannel
 
 @Composable
 fun StatsScreen(viewModel: AppViewModel) {
@@ -551,14 +565,36 @@ private const val STREAM_WS      = "wss://api.senseway.ca/ws/stream"
 
 @Composable
 fun CameraTab() {
+    // stream state
     var streaming       by remember { mutableStateOf(false) }
     var viewers         by remember { mutableIntStateOf(0) }
     var frameBitmap     by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var connectionLabel by remember { mutableStateOf("Connecting...") }
+    val mainHandler     = remember { Handler(Looper.getMainLooper()) }
 
-    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    // pathsense detection state
+    var detectionLabel     by remember { mutableStateOf<String?>(null) }
+    var detectionType      by remember { mutableStateOf("") }
+    var lastDetectionTime  by remember { mutableLongStateOf(0L) }
+    var isBlurry           by remember { mutableStateOf(false) }
+    var isBlocked          by remember { mutableStateOf(false) }
+    var ttsReady           by remember { mutableStateOf(false) }
+    var activeChips        by remember { mutableStateOf<List<Pair<String, Color>>>(emptyList()) }
+    var frameCounter       by remember { mutableIntStateOf(0) }
+    var consecutiveWalk    by remember { mutableIntStateOf(0) }
+    var consecutiveStop    by remember { mutableIntStateOf(0) }
+    var consecutiveTlState by remember { mutableStateOf("") }
+    var consecutiveTlCount by remember { mutableIntStateOf(0) }
+    var blurConsecutive    by remember { mutableIntStateOf(0) }
+    var blockedConsecutive by remember { mutableIntStateOf(0) }
+    val lastSpokenAt       = remember { mutableStateMapOf<String, Long>() }
+    val context            = LocalContext.current
+    var ttsInstance        by remember { mutableStateOf<TextToSpeech?>(null) }
 
-    // One-shot status fetch so the UI isn't blank before the WS handshakes
+    // cache interpreters so we only load from assets once
+    val interpHolder = remember { arrayOfNulls<Interpreter>(2) }
+
+    // one-shot status fetch before websocket connects
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             try {
@@ -581,7 +617,7 @@ fun CameraTab() {
         }
     }
 
-    // WebSocket lifecycle — self-reconnects on close/failure
+    // websocket — binary = jpeg frame, text = json status
     DisposableEffect(Unit) {
         var cancelled = false
         var currentWs: WebSocket? = null
@@ -599,15 +635,20 @@ fun CameraTab() {
                     }
                 }
 
-                // Binary frame = raw JPEG
+                // raw jpeg bytes → decode → update displayed frame
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                     if (cancelled) return
                     val arr = bytes.toByteArray()
                     val bmp = BitmapFactory.decodeByteArray(arr, 0, arr.size) ?: return
-                    mainHandler.post { if (!cancelled) frameBitmap = bmp }
+                    mainHandler.post {
+                        if (!cancelled) {
+                            frameBitmap?.recycle()  // free old frame memory
+                            frameBitmap = bmp
+                        }
+                    }
                 }
 
-                // Text frame = JSON status update
+                // json status → update streaming flag + viewer count
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     if (cancelled) return
                     try {
@@ -627,6 +668,10 @@ fun CameraTab() {
                 private fun scheduleReconnect() {
                     if (cancelled) return
                     mainHandler.post { if (!cancelled) connectionLabel = "Reconnecting..." }
+                    ttsInstance?.speak(
+                        "Stream disconnected. Reconnecting.",
+                        TextToSpeech.QUEUE_ADD, null, "disconnect"
+                    )
                     val r = Runnable { connect() }
                     reconnectRunnable = r
                     mainHandler.postDelayed(r, 3000L)
@@ -649,14 +694,324 @@ fun CameraTab() {
         }
     }
 
-    // ── UI ──────────────────────────────────────────────────────────────────
+    // tts init — speaks startup phrase when engine is ready
+    DisposableEffect(Unit) {
+        var tts: TextToSpeech? = null
+        tts = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.language = java.util.Locale.CANADA
+                tts?.setPitch(1.0f)
+                tts?.setSpeechRate(0.92f)
+                ttsReady = true
+                ttsInstance = tts
+                tts?.speak(
+                    "PathSense is active. Ready to assist.",
+                    TextToSpeech.QUEUE_ADD, null, "startup"
+                )
+            }
+        }
+        onDispose {
+            ttsInstance = null
+            tts?.stop()
+            tts?.shutdown()
+        }
+    }
+
+    // auto clear detection banner 10s after last detection
+    LaunchedEffect(lastDetectionTime) {
+        if (lastDetectionTime == 0L) return@LaunchedEffect
+        kotlinx.coroutines.delay(10_000)
+        if (System.currentTimeMillis() - lastDetectionTime >= 10_000) {
+            detectionLabel = null
+            detectionType  = ""
+            activeChips    = emptyList()
+        }
+    }
+
+    // blur + blocked check on every new frame
+    LaunchedEffect(frameBitmap) {
+        val bmp = frameBitmap ?: return@LaunchedEffect
+        withContext(Dispatchers.Default) {
+            val small = android.graphics.Bitmap.createScaledBitmap(bmp, 160, 120, false)
+
+            // mean luminance — low = blocked/covered
+            var totalLum = 0L
+            for (py in 0 until small.height) {
+                for (px in 0 until small.width) {
+                    val p = small.getPixel(px, py)
+                    val r = (p shr 16) and 0xFF
+                    val g = (p shr 8)  and 0xFF
+                    val b =  p         and 0xFF
+                    totalLum += (0.299 * r + 0.587 * g + 0.114 * b).toLong()
+                }
+            }
+            val meanLum = totalLum / (small.width * small.height)
+
+            // laplacian variance — low = blurry
+            val gray = IntArray(small.width * small.height)
+            for (py in 0 until small.height) {
+                for (px in 0 until small.width) {
+                    val p = small.getPixel(px, py)
+                    val r = (p shr 16) and 0xFF
+                    val g = (p shr 8)  and 0xFF
+                    val b =  p         and 0xFF
+                    gray[py * small.width + px] = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                }
+            }
+            var lapSum = 0.0; var lapCount = 0
+            for (py in 1 until small.height - 1) {
+                for (px in 1 until small.width - 1) {
+                    val lap = (
+                        -gray[(py - 1) * small.width + px]
+                        - gray[(py + 1) * small.width + px]
+                        - gray[py * small.width + (px - 1)]
+                        - gray[py * small.width + (px + 1)]
+                        + 4 * gray[py * small.width + px]
+                    ).toDouble()
+                    lapSum += lap * lap; lapCount++
+                }
+            }
+            val variance = if (lapCount > 0) lapSum / lapCount else 0.0
+
+            withContext(Dispatchers.Main) {
+                // blur — fire only after 3 consecutive blurry frames
+                if (variance < 80.0) {
+                    blurConsecutive++
+                    if (blurConsecutive >= 3 && !isBlurry) {
+                        isBlurry = true
+                        speakIfCooldown(ttsInstance, ttsReady, lastSpokenAt, "blur",
+                            "Please clean the camera lens.", urgent = false, cooldownMs = 60_000L)
+                    }
+                } else if (variance > 120.0) {
+                    blurConsecutive = 0
+                    if (isBlurry) {
+                        isBlurry = false
+                        speakIfCooldown(ttsInstance, ttsReady, lastSpokenAt, "blur_clear",
+                            "Camera is clear. PathSense is active.",
+                            urgent = false, cooldownMs = 10_000L)
+                    }
+                }
+
+                // blocked — fire only after 3 consecutive dark frames
+                if (meanLum < 30) {
+                    blockedConsecutive++
+                    if (blockedConsecutive >= 3 && !isBlocked) {
+                        isBlocked = true
+                        speakIfCooldown(ttsInstance, ttsReady, lastSpokenAt, "blocked",
+                            "Camera view is blocked.", urgent = false, cooldownMs = 60_000L)
+                    }
+                } else if (meanLum > 40) {
+                    blockedConsecutive = 0
+                    if (isBlocked) {
+                        isBlocked = false
+                        speakIfCooldown(ttsInstance, ttsReady, lastSpokenAt, "blocked_clear",
+                            "Camera is operational. PathSense is active to help you.",
+                            urgent = false, cooldownMs = 10_000L)
+                    }
+                }
+            }
+        }
+    }
+
+    // ml inference — every 3rd frame on background thread
+    LaunchedEffect(frameBitmap) {
+        val bmp = frameBitmap ?: return@LaunchedEffect
+        frameCounter++
+        if (frameCounter % 3 != 0) return@LaunchedEffect
+
+        withContext(Dispatchers.Default) {
+            try {
+                // load models lazily — cached after first load
+                if (interpHolder[0] == null)
+                    interpHolder[0] = loadInterpreter(context, "pathsense_pedestrian.tflite")
+                val interpreter = interpHolder[0] ?: return@withContext
+                if (interpHolder[1] == null)
+                    interpHolder[1] = loadInterpreter(context, "pathsense_traffic_light_state.tflite")
+                val tlInterpreter = interpHolder[1]
+
+                // resize to 640x640 and normalize pixels 0-1
+                val resized = android.graphics.Bitmap.createScaledBitmap(bmp, 640, 640, true)
+                val inputBuffer = ByteBuffer.allocateDirect(1 * 640 * 640 * 3 * 4)
+                inputBuffer.order(ByteOrder.nativeOrder())
+                for (py in 0 until 640) {
+                    for (px in 0 until 640) {
+                        val pixel = resized.getPixel(px, py)
+                        inputBuffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f)
+                        inputBuffer.putFloat(((pixel shr 8)  and 0xFF) / 255.0f)
+                        inputBuffer.putFloat(( pixel         and 0xFF) / 255.0f)
+                    }
+                }
+
+                // run yolo pedestrian + sign detection
+                val output = Array(1) { Array(8400) { FloatArray(10) } }
+                interpreter.run(inputBuffer, output)
+
+                val classThresholds = mapOf(
+                    0 to 0.85f,   // crosswalk
+                    1 to 0.88f,   // walk_signal
+                    2 to 0.88f,   // stop_signal
+                    3 to 0.82f,   // pedestrian_crossing_sign
+                    4 to 0.82f,   // school_crossing_sign
+                    5 to 0.80f    // traffic_light
+                )
+                val detections = parseYoloOutput(output[0], confThreshold = 0.80f, nmsThreshold = 0.45f)
+                val detectedClasses = detections
+                    .filter { it.confidence >= (classThresholds[it.classId] ?: 0.82f) }
+                    .map { it.classId }
+                    .toSet()
+
+                // traffic light classifier on cropped bounding box
+                var tlState = ""
+                if (5 in detectedClasses && tlInterpreter != null) {
+                    val tlDet = detections.firstOrNull { it.classId == 5 } ?: return@withContext
+                    val cropX = (tlDet.cx - tlDet.w / 2).coerceIn(0f, 1f)
+                    val cropY = (tlDet.cy - tlDet.h / 2).coerceIn(0f, 1f)
+                    val cropW = tlDet.w.coerceIn(0f, 1f - cropX)
+                    val cropH = tlDet.h.coerceIn(0f, 1f - cropY)
+                    val cropBmp = android.graphics.Bitmap.createBitmap(
+                        bmp,
+                        (cropX * bmp.width).toInt(),
+                        (cropY * bmp.height).toInt(),
+                        (cropW * bmp.width).toInt().coerceAtLeast(1),
+                        (cropH * bmp.height).toInt().coerceAtLeast(1)
+                    )
+                    val tlResized = android.graphics.Bitmap.createScaledBitmap(cropBmp, 96, 96, true)
+                    val tlBuffer = ByteBuffer.allocateDirect(1 * 96 * 96 * 3 * 4)
+                    tlBuffer.order(ByteOrder.nativeOrder())
+                    for (py in 0 until 96) {
+                        for (px in 0 until 96) {
+                            val pixel = tlResized.getPixel(px, py)
+                            tlBuffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f)
+                            tlBuffer.putFloat(((pixel shr 8)  and 0xFF) / 255.0f)
+                            tlBuffer.putFloat(( pixel         and 0xFF) / 255.0f)
+                        }
+                    }
+                    val tlOutput = Array(1) { FloatArray(3) }
+                    tlInterpreter.run(tlBuffer, tlOutput)
+                    val states = listOf("red", "yellow", "green")
+                    val maxIdx = tlOutput[0].indices.maxByOrNull { tlOutput[0][it] } ?: -1
+                    if (maxIdx >= 0 && tlOutput[0][maxIdx] >= 0.90f) {
+                        // needs 3 consecutive frames agreeing on same state
+                        val stateStr = states[maxIdx]
+                        if (stateStr == consecutiveTlState) consecutiveTlCount++
+                        else { consecutiveTlState = stateStr; consecutiveTlCount = 1 }
+                        if (consecutiveTlCount >= 3) tlState = stateStr
+                    }
+                }
+
+                // track consecutive walk/stop frames for confirmation
+                if (1 in detectedClasses) consecutiveWalk++ else consecutiveWalk = 0
+                if (2 in detectedClasses) consecutiveStop++ else consecutiveStop = 0
+                val confirmedWalk = consecutiveWalk >= 4
+                val confirmedStop = consecutiveStop >= 4
+                val chips = mutableListOf<Pair<String, Color>>()
+
+                withContext(Dispatchers.Main) {
+                    // priority 1: stop signal — do not cross
+                    if (confirmedStop) {
+                        triggerDetection("stop_signal",
+                            "Stop — Do not cross. Wait for the walk signal.", "warning",
+                            "Stop. Do not cross.", urgent = true, cooldownMs = 8_000L,
+                            tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                            setLabel = { detectionLabel = it },
+                            setType  = { detectionType = it },
+                            setTime  = { lastDetectionTime = it })
+                        chips.add("Stop Signal" to RedAlert)
+                    }
+                    // priority 2: walk signal — safe to cross
+                    if (confirmedWalk && !confirmedStop) {
+                        triggerDetection("walk_signal",
+                            "Walk sign is on — Safe to cross", "safe",
+                            "Walk sign is on. Safe to cross.", urgent = true, cooldownMs = 8_000L,
+                            tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                            setLabel = { detectionLabel = it },
+                            setType  = { detectionType = it },
+                            setTime  = { lastDetectionTime = it })
+                        chips.add("Walk Signal" to GreenOk)
+                    }
+                    // priority 3: crosswalk with no signal present
+                    if (0 in detectedClasses && !confirmedWalk && !confirmedStop) {
+                        triggerDetection("crosswalk",
+                            "Crosswalk detected — Cross slowly and check both ways", "caution",
+                            "Crosswalk ahead. Check traffic both ways.",
+                            urgent = false, cooldownMs = 12_000L,
+                            tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                            setLabel = { detectionLabel = it },
+                            setType  = { detectionType = it },
+                            setTime  = { lastDetectionTime = it })
+                        chips.add("Crosswalk" to YellowWarn)
+                    }
+                    // priority 4: pedestrian crossing sign
+                    if (3 in detectedClasses) {
+                        triggerDetection("ped_sign",
+                            "Pedestrian crossing ahead", "info",
+                            "Pedestrian crossing ahead.",
+                            urgent = false, cooldownMs = 15_000L,
+                            tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                            setLabel = { detectionLabel = it },
+                            setType  = { detectionType = it },
+                            setTime  = { lastDetectionTime = it })
+                        chips.add("Crossing Sign" to ElectricBlue)
+                    }
+                    // priority 5: school crossing sign
+                    if (4 in detectedClasses) {
+                        triggerDetection("school_sign",
+                            "School crossing zone — Reduced speed area", "info",
+                            "School crossing zone ahead.",
+                            urgent = false, cooldownMs = 15_000L,
+                            tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                            setLabel = { detectionLabel = it },
+                            setType  = { detectionType = it },
+                            setTime  = { lastDetectionTime = it })
+                        chips.add("School Zone" to YellowWarn)
+                    }
+                    // priority 6: traffic light state
+                    when (tlState) {
+                        "red" -> {
+                            triggerDetection("tl_red",
+                                "Red light — Do not cross", "warning",
+                                "Red light.", urgent = true, cooldownMs = 6_000L,
+                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                                setLabel = { detectionLabel = it },
+                                setType  = { detectionType = it },
+                                setTime  = { lastDetectionTime = it })
+                            chips.add("Red Light" to RedAlert)
+                        }
+                        "green" -> {
+                            triggerDetection("tl_green",
+                                "Green light", "safe",
+                                "Green light.", urgent = false, cooldownMs = 6_000L,
+                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                                setLabel = { detectionLabel = it },
+                                setType  = { detectionType = it },
+                                setTime  = { lastDetectionTime = it })
+                            chips.add("Green Light" to GreenOk)
+                        }
+                        "yellow" -> {
+                            triggerDetection("tl_yellow",
+                                "Light is changing — Caution", "caution",
+                                "Light is changing. Caution.", urgent = false, cooldownMs = 6_000L,
+                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                                setLabel = { detectionLabel = it },
+                                setType  = { detectionType = it },
+                                setTime  = { lastDetectionTime = it })
+                            chips.add("Yellow Light" to YellowWarn)
+                        }
+                    }
+                    if (chips.isNotEmpty()) activeChips = chips
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    // ── UI ───────────────────────────────────────────────────────────────────
     Column(
         Modifier
             .fillMaxSize()
             .background(BgDeep)
     ) {
 
-        // Status bar
+        // stream connection status bar
         Surface(
             Modifier
                 .fillMaxWidth()
@@ -680,9 +1035,9 @@ fun CameraTab() {
                     fontSize     = 13.sp,
                     fontWeight   = FontWeight.SemiBold,
                     color        = when {
-                        streaming                         -> GreenOk
+                        streaming                            -> GreenOk
                         connectionLabel == "Reconnecting..." -> YellowWarn
-                        else                              -> TextMuted
+                        else                                 -> TextMuted
                     }
                 )
                 Spacer(Modifier.weight(1f))
@@ -698,7 +1053,7 @@ fun CameraTab() {
             }
         }
 
-        // Camera frame area
+        // live camera frame — fills all available space
         Surface(
             Modifier
                 .fillMaxWidth()
@@ -759,8 +1114,223 @@ fun CameraTab() {
             }
         }
 
+        // detection info panel — color + icon driven by detection type
+        val (panelBg, panelBorder, panelIcon) = when {
+            isBlocked -> Triple(RedAlert.copy(alpha = 0.08f),     RedAlert,     Icons.Default.Block)
+            isBlurry  -> Triple(YellowWarn.copy(alpha = 0.08f),   YellowWarn,   Icons.Default.BlurOn)
+            detectionType == "safe"    -> Triple(GreenOk.copy(alpha = 0.08f),      GreenOk,      Icons.Default.CheckCircle)
+            detectionType == "warning" -> Triple(RedAlert.copy(alpha = 0.08f),     RedAlert,     Icons.Default.Warning)
+            detectionType == "caution" -> Triple(YellowWarn.copy(alpha = 0.08f),   YellowWarn,   Icons.Default.ReportProblem)
+            detectionType == "info"    -> Triple(ElectricBlue.copy(alpha = 0.08f), ElectricBlue, Icons.Default.Info)
+            else                       -> Triple(PanelPurple, CardBorder, Icons.Default.Visibility)
+        }
+        val panelText = when {
+            isBlocked              -> "Camera view blocked — Please clear the lens"
+            isBlurry               -> "Image blurry — Please clean the camera lens"
+            detectionLabel != null -> detectionLabel!!
+            else                   -> "No pedestrian alerts detected"
+        }
+        val panelTextColor = when {
+            isBlocked              -> RedAlert
+            isBlurry               -> YellowWarn
+            detectionLabel != null -> panelBorder
+            else                   -> TextMuted
+        }
+
+        Surface(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            shape  = RoundedCornerShape(14.dp),
+            color  = panelBg,
+            border = BorderStroke(1.dp, panelBorder.copy(alpha = 0.45f))
+        ) {
+            Row(
+                Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier
+                        .size(36.dp)
+                        .background(panelBorder.copy(alpha = 0.15f), RoundedCornerShape(10.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(panelIcon, null, tint = panelBorder, modifier = Modifier.size(20.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    panelText,
+                    fontSize   = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color      = panelTextColor,
+                    modifier   = Modifier.weight(1f)
+                )
+            }
+        }
+
+        // detected class chips — horizontally scrollable
+        if (activeChips.isNotEmpty()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                activeChips.forEach { (label, color) ->
+                    Surface(
+                        shape  = RoundedCornerShape(20.dp),
+                        color  = color.copy(alpha = 0.12f),
+                        border = BorderStroke(1.dp, color.copy(alpha = 0.35f))
+                    ) {
+                        Text(
+                            label,
+                            modifier   = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            fontSize   = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color      = color
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        // pathsense disclaimer footer — always visible
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .background(ElectricBlue.copy(alpha = 0.55f), CircleShape)
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    "PathSense",
+                    fontSize   = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color      = ElectricBlue.copy(alpha = 0.65f)
+                )
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "Assistive tool only — always verify safety yourself",
+                fontSize = 10.sp,
+                color    = TextMuted.copy(alpha = 0.45f)
+            )
+        }
+
         Spacer(Modifier.height(96.dp))
     }
+}
+
+// bounding box from yolo output row
+data class Detection(
+    val classId: Int,
+    val confidence: Float,
+    val cx: Float, val cy: Float,
+    val w: Float,  val h: Float
+)
+
+// parse raw yolo rows → detections, then nms filter
+private fun parseYoloOutput(
+    output: Array<FloatArray>,
+    confThreshold: Float,
+    nmsThreshold: Float
+): List<Detection> {
+    val raw = mutableListOf<Detection>()
+    for (row in output) {
+        val conf = row[4]
+        if (conf < confThreshold) continue
+        val classScores = row.drop(5)
+        val classId = classScores.indices.maxByOrNull { classScores[it] } ?: continue
+        val classConf = conf * classScores[classId]
+        if (classConf < confThreshold) continue
+        raw.add(Detection(classId, classConf, row[0], row[1], row[2], row[3]))
+    }
+    return applyNms(raw, nmsThreshold)
+}
+
+// keep highest confidence boxes, suppress overlapping ones
+private fun applyNms(detections: List<Detection>, iouThreshold: Float): List<Detection> {
+    val sorted = detections.sortedByDescending { it.confidence }.toMutableList()
+    val result = mutableListOf<Detection>()
+    while (sorted.isNotEmpty()) {
+        val best = sorted.removeAt(0)
+        result.add(best)
+        sorted.removeAll { iou(best, it) > iouThreshold }
+    }
+    return result
+}
+
+// intersection over union between two boxes
+private fun iou(a: Detection, b: Detection): Float {
+    val ax1 = a.cx - a.w / 2; val ay1 = a.cy - a.h / 2
+    val ax2 = a.cx + a.w / 2; val ay2 = a.cy + a.h / 2
+    val bx1 = b.cx - b.w / 2; val by1 = b.cy - b.h / 2
+    val bx2 = b.cx + b.w / 2; val by2 = b.cy + b.h / 2
+    val ix1 = maxOf(ax1, bx1); val iy1 = maxOf(ay1, by1)
+    val ix2 = minOf(ax2, bx2); val iy2 = minOf(ay2, by2)
+    val inter = maxOf(0f, ix2 - ix1) * maxOf(0f, iy2 - iy1)
+    val union = a.w * a.h + b.w * b.h - inter
+    return if (union <= 0f) 0f else inter / union
+}
+
+// memory-map tflite model from assets — null if file missing
+private fun loadInterpreter(context: Context, modelName: String): Interpreter? {
+    return try {
+        val afd = context.assets.openFd(modelName)
+        val fis = FileInputStream(afd.fileDescriptor)
+        val buffer = fis.channel.map(
+            FileChannel.MapMode.READ_ONLY,
+            afd.startOffset,
+            afd.declaredLength
+        )
+        val options = Interpreter.Options().apply {
+            setNumThreads(4)
+            setUseXNNPACK(true)
+        }
+        Interpreter(buffer, options)
+    } catch (_: Exception) { null }
+}
+
+// speak phrase only if cooldown has elapsed for this key
+private fun speakIfCooldown(
+    tts: TextToSpeech?,
+    ttsReady: Boolean,
+    lastSpokenAt: MutableMap<String, Long>,
+    key: String,
+    phrase: String,
+    urgent: Boolean,
+    cooldownMs: Long
+) {
+    if (!ttsReady || tts == null) return
+    val now = System.currentTimeMillis()
+    if (now - (lastSpokenAt[key] ?: 0L) < cooldownMs) return
+    lastSpokenAt[key] = now
+    tts.speak(phrase, if (urgent) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, key)
+}
+
+// update detection state + announce if cooldown allows
+private fun triggerDetection(
+    key: String, label: String, type: String,
+    phrase: String, urgent: Boolean, cooldownMs: Long,
+    tts: TextToSpeech?, ttsReady: Boolean,
+    lastSpokenAt: MutableMap<String, Long>,
+    setLabel: (String) -> Unit,
+    setType:  (String) -> Unit,
+    setTime:  (Long)   -> Unit
+) {
+    val now = System.currentTimeMillis()
+    if (now - (lastSpokenAt[key] ?: 0L) < cooldownMs) return
+    lastSpokenAt[key] = now
+    setLabel(label); setType(type); setTime(now)
+    speakIfCooldown(tts, ttsReady, lastSpokenAt, "${key}_tts", phrase, urgent, 0L)
 }
 
 @Composable
