@@ -331,8 +331,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val resp = SenseWayClient.api.getUser(userId)
             if (resp.isSuccessful) {
                 val full = resp.body() ?: return
-                // only re-decode avatar if the URL actually changed
-                if (full.avatar_url != currentUser?.avatar_url) {
+                // decode avatar if bitmap not loaded yet, or if URL changed
+                if (!full.avatar_url.isNullOrBlank() &&
+                    (avatarBitmap == null || full.avatar_url != currentUser?.avatar_url)
+                ) {
                     decodeAvatar(full.avatar_url)
                 }
                 currentUser = full

@@ -14,13 +14,13 @@ import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
 class YoloDetector(
     private val context: Context,
     private val modelPath: String,
-    private val labels: List<String> = listOf("crosswalk")
+    private val labels: List<String> = listOf("crosswalk"),
+    private val confidenceThreshold: Float = 0.45f
 ) {
     private var interpreter: Interpreter? = null
     private var inputImageWidth  = 640
     private var inputImageHeight = 640
-    private val confidenceThreshold = 0.45f  // safe threshold for production
-    private val iouThreshold        = 0.50f
+    private val iouThreshold = 0.50f
 
     init {
         val model = FileUtil.loadMappedFile(context, modelPath)

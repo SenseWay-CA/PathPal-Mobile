@@ -4,7 +4,6 @@ package ca.senseway.pathpaldemo
 import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -27,6 +26,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -41,6 +42,7 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import okhttp3.Response
@@ -48,20 +50,10 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
-import android.content.Context
 import android.speech.tts.TextToSpeech
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.support.image.TensorImage
-import org.tensorflow.lite.support.image.ImageProcessor
-import org.tensorflow.lite.support.image.ops.ResizeOp
-import org.tensorflow.lite.support.common.ops.NormalizeOp
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.io.FileInputStream
-import java.nio.channels.FileChannel
 
 @Composable
 fun StatsScreen(viewModel: AppViewModel) {
@@ -710,8 +702,6 @@ fun CameraTab() {
     var frameCounter       by remember { mutableIntStateOf(0) }
     var consecutiveWalk    by remember { mutableIntStateOf(0) }
     var consecutiveStop    by remember { mutableIntStateOf(0) }
-    var consecutiveTlState by remember { mutableStateOf("") }
-    var consecutiveTlCount by remember { mutableIntStateOf(0) }
     var blurConsecutive    by remember { mutableIntStateOf(0) }
     var blockedConsecutive by remember { mutableIntStateOf(0) }
     val lastSpokenAt       = remember { mutableStateMapOf<String, Long>() }
@@ -719,7 +709,15 @@ fun CameraTab() {
     var ttsInstance        by remember { mutableStateOf<TextToSpeech?>(null) }
 
     // cache yolo detector — loaded lazily on first inference
-    val detectorRef = remember { Array<YoloDetector?>(1) { null } }
+    val detectorRef   = remember { Array<YoloDetector?>(1) { null } }
+
+    // walk signal model state
+    val wsDetectorRef = remember { Array<YoloDetector?>(1) { null } }
+    var walkBoxes     by remember { mutableStateOf<List<YoloDetector.BoundingBox>>(emptyList()) }
+    var consecWsWalk  by remember { mutableIntStateOf(0) }
+    var consecWsWait  by remember { mutableIntStateOf(0) }
+    var wsCooldownUntil by remember { mutableLongStateOf(0L) }
+    val soundPlayer   = remember { WalkSignalSoundPlayer(context) }
 
     // one-shot status fetch before websocket connects
     LaunchedEffect(Unit) {
@@ -837,12 +835,13 @@ fun CameraTab() {
         var tts: TextToSpeech? = null
         tts = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                tts?.language = java.util.Locale.CANADA
-                tts?.setPitch(1.0f)
-                tts?.setSpeechRate(0.92f)
+                val t = tts ?: return@TextToSpeech
+                t.language = Locale.CANADA
+                t.setPitch(1.0f)
+                t.setSpeechRate(0.92f)
                 ttsReady = true
-                ttsInstance = tts
-                tts?.speak(
+                ttsInstance = t
+                t.speak(
                     "PathSense is active. Ready to assist.",
                     TextToSpeech.QUEUE_ADD, null, "startup"
                 )
@@ -850,15 +849,17 @@ fun CameraTab() {
         }
         onDispose {
             ttsInstance = null
-            tts?.stop()
-            tts?.shutdown()
+            tts?.let { it.stop(); it.shutdown() }
         }
     }
+
+    // release sound player when composable leaves
+    DisposableEffect(Unit) { onDispose { soundPlayer.stopAll() } }
 
     // stagnant frame detection — if no frame arrives for 5s while "connected", mark as no signal
     LaunchedEffect(Unit) {
         while (true) {
-            kotlinx.coroutines.delay(3_000)
+            delay(3_000)
             val t = lastFrameReceivedAt
             val stagnant = t > 0 && (System.currentTimeMillis() - t) > 5_000
             if (stagnant && !frameStagnant) {
@@ -874,7 +875,7 @@ fun CameraTab() {
     // auto clear detection banner 10s after last detection
     LaunchedEffect(lastDetectionTime) {
         if (lastDetectionTime == 0L) return@LaunchedEffect
-        kotlinx.coroutines.delay(10_000)
+        delay(10_000)
         if (System.currentTimeMillis() - lastDetectionTime >= 10_000) {
             detectionLabel = null
             detectionType  = ""
@@ -990,14 +991,14 @@ fun CameraTab() {
                 val boxes = detector.detect(bmp)
                 val detectedClasses = boxes.map { it.classId }.toSet()
 
-                // track consecutive walk/stop frames for confirmation
-                if (1 in detectedClasses) consecutiveWalk++ else consecutiveWalk = 0
-                if (2 in detectedClasses) consecutiveStop++ else consecutiveStop = 0
-                val confirmedWalk = consecutiveWalk >= 4
-                val confirmedStop = consecutiveStop >= 4
-                val chips = mutableListOf<Pair<String, Color>>()
-
                 withContext(Dispatchers.Main) {
+                    // update consecutive counters on main thread (Compose state safety)
+                    if (1 in detectedClasses) consecutiveWalk++ else consecutiveWalk = 0
+                    if (2 in detectedClasses) consecutiveStop++ else consecutiveStop = 0
+                    val confirmedWalk = consecutiveWalk >= 4
+                    val confirmedStop = consecutiveStop >= 4
+                    val chips = mutableListOf<Pair<String, Color>>()
+
                     // priority 1: stop signal — do not cross
                     if (confirmedStop) {
                         triggerDetection("stop_signal",
@@ -1057,6 +1058,54 @@ fun CameraTab() {
                         chips.add("School Zone" to YellowWarn)
                     }
                     if (chips.isNotEmpty()) activeChips = chips
+                }
+
+                // ── walk signal model (walksignal.tflite) ──────────────────────────
+                if (wsDetectorRef[0] == null)
+                    wsDetectorRef[0] = YoloDetector(
+                        context, "walksignal.tflite",
+                        labels = listOf("walk", "wait"),
+                        confidenceThreshold = 0.68f   // strict — no false positives
+                    )
+                val wsBoxesRaw = wsDetectorRef[0]!!.detect(bmp)
+                // extra confidence guard + require meaningful box size
+                val wsBoxes = wsBoxesRaw.filter { box ->
+                    box.score >= 0.68f &&
+                    (box.x2 - box.x1) > bmp.width  * 0.04f &&
+                    (box.y2 - box.y1) > bmp.height * 0.04f
+                }
+                val wsWalkHit = wsBoxes.any { it.label == "walk" }
+                val wsWaitHit = wsBoxes.any { it.label == "wait" }
+
+                withContext(Dispatchers.Main) {
+                    // update counters on main thread (Compose state safety)
+                    if (wsWalkHit) consecWsWalk++ else consecWsWalk = 0
+                    if (wsWaitHit) consecWsWait++ else consecWsWait = 0
+                    walkBoxes = wsBoxes
+                    val now = System.currentTimeMillis()
+                    if (now > wsCooldownUntil) {
+                        // walk signal confirmed — 5 consecutive frames required
+                        if (consecWsWalk >= 5) {
+                            wsCooldownUntil = now + 60_000L
+                            consecWsWalk = 0
+                            consecWsWait = 0
+                            soundPlayer.playWalk()
+                            detectionLabel  = "Walk sign is on. Safe to cross."
+                            detectionType   = "safe"
+                            lastDetectionTime = now
+                            activeChips = activeChips.toMutableList().also { it.add(0, "Walk Signal" to GreenOk) }
+                        // wait/stop hand confirmed — 5 consecutive frames required
+                        } else if (consecWsWait >= 5) {
+                            wsCooldownUntil = now + 60_000L
+                            consecWsWait = 0
+                            consecWsWalk = 0
+                            soundPlayer.playWait()
+                            detectionLabel  = "Wait. Do not cross."
+                            detectionType   = "warning"
+                            lastDetectionTime = now
+                            activeChips = activeChips.toMutableList().also { it.add(0, "Wait" to RedAlert) }
+                        }
+                    }
                 }
             } catch (_: Exception) {}
         }
@@ -1137,6 +1186,67 @@ fun CameraTab() {
                         modifier           = Modifier.fillMaxSize(),
                         contentScale       = ContentScale.Fit
                     )
+                    // walk signal bounding box overlay
+                    if (walkBoxes.isNotEmpty()) {
+                        val bmp = frameBitmap!!
+                        Canvas(Modifier.fillMaxSize()) {
+                            val scaleX = size.width  / bmp.width
+                            val scaleY = size.height / bmp.height
+                            val scale  = minOf(scaleX, scaleY)
+                            val imgW   = bmp.width  * scale
+                            val imgH   = bmp.height * scale
+                            val dx     = (size.width  - imgW) / 2f
+                            val dy     = (size.height - imgH) / 2f
+
+                            val labelPaint = android.graphics.Paint().apply {
+                                color       = android.graphics.Color.WHITE
+                                textSize    = 36f
+                                typeface    = android.graphics.Typeface.DEFAULT_BOLD
+                                isAntiAlias = true
+                            }
+
+                            for (box in walkBoxes) {
+                                val isWalk   = box.label == "walk"
+                                val accent   = if (isWalk) GreenOk else RedAlert
+                                val nativeBg = if (isWalk)
+                                    android.graphics.Color.argb(200, 34, 197, 94)
+                                else
+                                    android.graphics.Color.argb(200, 239, 68, 68)
+
+                                val l = dx + box.x1 / bmp.width  * imgW
+                                val t = dy + box.y1 / bmp.height * imgH
+                                val r = dx + box.x2 / bmp.width  * imgW
+                                val b = dy + box.y2 / bmp.height * imgH
+
+                                // tinted fill
+                                drawRect(color = accent.copy(alpha = 0.15f), topLeft = Offset(l, t), size = Size(r - l, b - t))
+                                // border
+                                drawRect(color = accent, topLeft = Offset(l, t), size = Size(r - l, b - t), style = Stroke(width = 3.5f, cap = StrokeCap.Round))
+                                // corner accents
+                                val ca = 18f; val cw = 4f
+                                drawLine(accent, Offset(l, t),      Offset(l + ca, t), cw)
+                                drawLine(accent, Offset(l, t),      Offset(l, t + ca), cw)
+                                drawLine(accent, Offset(r - ca, t), Offset(r, t),      cw)
+                                drawLine(accent, Offset(r, t),      Offset(r, t + ca), cw)
+                                drawLine(accent, Offset(l, b - ca), Offset(l, b),      cw)
+                                drawLine(accent, Offset(l, b),      Offset(l + ca, b), cw)
+                                drawLine(accent, Offset(r - ca, b), Offset(r, b),      cw)
+                                drawLine(accent, Offset(r, b - ca), Offset(r, b),      cw)
+
+                                // label pill via native canvas
+                                val labelText = "${if (isWalk) "WALK" else "WAIT"} ${(box.score * 100).toInt()}%"
+                                val textW     = labelPaint.measureText(labelText)
+                                val pillPaint = android.graphics.Paint().apply { color = nativeBg; isAntiAlias = true }
+                                drawIntoCanvas { c ->
+                                    c.nativeCanvas.drawRoundRect(
+                                        android.graphics.RectF(l, t - 48f, l + textW + 20f, t - 4f),
+                                        8f, 8f, pillPaint
+                                    )
+                                    c.nativeCanvas.drawText(labelText, l + 10f, t - 16f, labelPaint)
+                                }
+                            }
+                        }
+                    }
                 } else {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
