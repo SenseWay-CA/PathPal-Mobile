@@ -43,13 +43,18 @@ android {
     aaptOptions {
         noCompress("tflite")
     }
+    packaging {
+        jniLibs {
+            // store .so uncompressed so the OS can mmap them at 16 KB boundaries
+            useLegacyPackaging = false
+        }
+    }
 }
 
 dependencies {
-    // TFLite — on-device ML inference for PathSense
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    // LiteRT (Google's rebrand of TFLite) — 16 KB aligned, faster than old org.tensorflow packages
+    implementation("com.google.ai.edge.litert:litert:1.0.1")
+    implementation("com.google.ai.edge.litert:litert-support:1.0.1")
 
     // Retrofit + OkHttp (cookie jar for session auth)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

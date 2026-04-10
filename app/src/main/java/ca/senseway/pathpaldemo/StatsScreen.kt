@@ -703,7 +703,6 @@ fun CameraTab() {
     // soft-decay counters: missed frame decrements by 1 instead of zeroing, so a single
     // dropped frame won't kill a valid detection streak
     var consecutiveWalk    by remember { mutableIntStateOf(0) }
-    var consecutiveStop    by remember { mutableIntStateOf(0) }
     var blurConsecutive    by remember { mutableIntStateOf(0) }
     var blockedConsecutive by remember { mutableIntStateOf(0) }
     val lastSpokenAt       = remember { mutableStateMapOf<String, Long>() }
