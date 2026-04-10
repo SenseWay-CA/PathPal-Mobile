@@ -20,13 +20,13 @@ class YoloDetector(
     private var interpreter: Interpreter? = null
     private var inputImageWidth  = 640
     private var inputImageHeight = 640
-    private val iouThreshold = 0.45f   // tighter NMS — removes more overlapping duplicates
+    private val iouThreshold = 0.30f   // aggressive NMS — kill overlapping boxes hard
 
     init {
         val model = FileUtil.loadMappedFile(context, modelPath)
         val options = Interpreter.Options().apply {
-            setNumThreads(4)
-            // GPU delegate would help but requires extra dep — CPU with 4 threads is solid
+            // use all available cores, capped at 4 — beyond 4 threads TFLite sees diminishing returns
+            setNumThreads(minOf(Runtime.getRuntime().availableProcessors(), 4))
         }
         interpreter = Interpreter(model, options)
 
@@ -98,6 +98,7 @@ class YoloDetector(
             val best = sorted.removeAt(0)
             selected.add(best)
             sorted.removeAll { calculateIou(best, it) >= iouThreshold }
+            if (selected.size >= 5) break  // hard cap — never show more than 5 boxes
         }
         return selected
     }

@@ -715,7 +715,8 @@ fun CameraTab() {
     var pathsenseBoxes by remember { mutableStateOf<List<YoloDetector.BoundingBox>>(emptyList()) }
 
     // walk signal model state
-    val wsDetectorRef = remember { Array<YoloDetector?>(1) { null } }
+    val wsDetectorRef   = remember { Array<YoloDetector?>(1) { null } }
+    val inferenceActive = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     var walkBoxes     by remember { mutableStateOf<List<YoloDetector.BoundingBox>>(emptyList()) }
     var consecWsWalk  by remember { mutableIntStateOf(0) }
     var consecWsWait  by remember { mutableIntStateOf(0) }
@@ -876,11 +877,11 @@ fun CameraTab() {
         }
     }
 
-    // auto clear detection banner 5s after last detection
+    // auto clear detection banner 7s after last detection
     LaunchedEffect(lastDetectionTime) {
         if (lastDetectionTime == 0L) return@LaunchedEffect
-        delay(5_000)
-        if (System.currentTimeMillis() - lastDetectionTime >= 5_000) {
+        delay(7_000)
+        if (System.currentTimeMillis() - lastDetectionTime >= 7_000) {
             detectionLabel = null
             detectionType  = ""
             activeChips    = emptyList()
@@ -975,16 +976,16 @@ fun CameraTab() {
         }
     }
 
-    // auto-clear bounding boxes 5s after last detection (so they don't linger)
+    // auto-clear bounding boxes 7s after last detection (so they don't linger)
     LaunchedEffect(walkBoxes) {
         if (walkBoxes.isNotEmpty()) {
-            delay(5_000)
+            delay(7_000)
             walkBoxes = emptyList()
         }
     }
     LaunchedEffect(pathsenseBoxes) {
         if (pathsenseBoxes.isNotEmpty()) {
-            delay(5_000)
+            delay(7_000)
             pathsenseBoxes = emptyList()
         }
     }
@@ -996,7 +997,6 @@ fun CameraTab() {
         frameCounter++
         val runPathsense  = frameCounter % 2 == 0
         val runWalksignal = frameCounter % 2 == 1
-        if (!runPathsense && !runWalksignal) return@LaunchedEffect
 
         // skip inference entirely on bad frames — blurry/blocked pixels produce garbage detections
         if (isBlurry || isBlocked) {
@@ -1007,6 +1007,9 @@ fun CameraTab() {
             }
             return@LaunchedEffect
         }
+
+        // drop frame if previous inference is still running — prevents CPU pileup on slow devices
+        if (!inferenceActive.compareAndSet(false, true)) return@LaunchedEffect
 
         withContext(Dispatchers.Default) {
             try {
@@ -1019,15 +1022,15 @@ fun CameraTab() {
                                 detectorRef[0] = YoloDetector(
                                     context, "pathsense_pedestrian.tflite",
                                     labels = listOf("crosswalk"),
-                                    confidenceThreshold = 0.40f
+                                    confidenceThreshold = 0.52f
                                 )
                         }
                     val detector = detectorRef[0] ?: return@withContext
                     val rawBoxes = detector.detect(bmp)
                     // reject tiny blips — real crosswalks must occupy some portion of frame
                     val boxes = rawBoxes.filter { box ->
-                        (box.x2 - box.x1) > bmp.width  * 0.04f &&
-                        (box.y2 - box.y1) > bmp.height * 0.04f
+                        (box.x2 - box.x1) > bmp.width  * 0.06f &&
+                        (box.y2 - box.y1) > bmp.height * 0.06f
                     }
                     val topScore = boxes.maxOfOrNull { it.score } ?: 0f
                     val crosswalkHit = boxes.isNotEmpty()
@@ -1065,7 +1068,7 @@ fun CameraTab() {
                                 wsDetectorRef[0] = YoloDetector(
                                     context, "walksignal.tflite",
                                     labels = listOf("wait", "walk"),
-                                    confidenceThreshold = 0.55f
+                                    confidenceThreshold = 0.65f
                                 )
                         }
                     val wsDetector = wsDetectorRef[0] ?: return@withContext
@@ -1090,7 +1093,7 @@ fun CameraTab() {
                         val now = System.currentTimeMillis()
                         // walk and wait have independent cooldowns — changing signal always gets through
                         if (consecWsWalk >= 4 && now > wsWalkCooldownUntil) {
-                            wsWalkCooldownUntil = now + 30_000L  // 30s cooldown for walk
+                            wsWalkCooldownUntil = now + 30_000L
                             consecWsWalk        = 0
                             consecWsWait        = 0
                             soundPlayer.playWalk()
@@ -1099,9 +1102,14 @@ fun CameraTab() {
                             lastDetectionTime = now
                             activeChips = activeChips.toMutableList()
                                 .also { it.add(0, "Walk Signal" to GreenOk) }
+                            // TTS announcement — flush queue so it's heard immediately
+                            if (ttsReady) ttsInstance?.speak(
+                                "Walk sign on. Safe to cross.",
+                                TextToSpeech.QUEUE_FLUSH, null, "ws_walk_tts"
+                            )
                         }
                         if (consecWsWait >= 4 && now > wsWaitCooldownUntil) {
-                            wsWaitCooldownUntil = now + 15_000L  // 15s cooldown for wait (urgent)
+                            wsWaitCooldownUntil = now + 15_000L
                             consecWsWait        = 0
                             consecWsWalk        = 0
                             soundPlayer.playWait()
@@ -1110,10 +1118,18 @@ fun CameraTab() {
                             lastDetectionTime = now
                             activeChips = activeChips.toMutableList()
                                 .also { it.add(0, "Wait" to RedAlert) }
+                            // TTS announcement — urgent, flush queue
+                            if (ttsReady) ttsInstance?.speak(
+                                "Wait. Do not cross.",
+                                TextToSpeech.QUEUE_FLUSH, null, "ws_wait_tts"
+                            )
                         }
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            } finally {
+                inferenceActive.set(false)
+            }
         }
     }
 
@@ -1481,10 +1497,13 @@ private fun triggerDetection(
     setTime:  (Long)   -> Unit
 ) {
     val now = System.currentTimeMillis()
+    // always update visual state — banner must show regardless of TTS cooldown
+    setLabel(label); setType(type); setTime(now)
+    // TTS: only announce if ready and cooldown allows
+    if (!ttsReady || tts == null) return
     if (now - (lastSpokenAt[key] ?: 0L) < cooldownMs) return
     lastSpokenAt[key] = now
-    setLabel(label); setType(type); setTime(now)
-    speakIfCooldown(tts, ttsReady, lastSpokenAt, "${key}_tts", phrase, urgent, 0L)
+    tts.speak(phrase, if (urgent) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, key)
 }
 
 @Composable
