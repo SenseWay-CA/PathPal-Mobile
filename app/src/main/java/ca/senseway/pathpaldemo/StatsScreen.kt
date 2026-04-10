@@ -876,11 +876,11 @@ fun CameraTab() {
         }
     }
 
-    // auto clear detection banner 10s after last detection
+    // auto clear detection banner 5s after last detection
     LaunchedEffect(lastDetectionTime) {
         if (lastDetectionTime == 0L) return@LaunchedEffect
-        delay(10_000)
-        if (System.currentTimeMillis() - lastDetectionTime >= 10_000) {
+        delay(5_000)
+        if (System.currentTimeMillis() - lastDetectionTime >= 5_000) {
             detectionLabel = null
             detectionType  = ""
             activeChips    = emptyList()
@@ -975,100 +975,66 @@ fun CameraTab() {
         }
     }
 
-    // ml inference — staggered: pathsense on frame%6==0, walksignal on frame%6==3
-    // never both at once — halves peak inference load per pass
+    // auto-clear bounding boxes 5s after last detection (so they don't linger)
+    LaunchedEffect(walkBoxes) {
+        if (walkBoxes.isNotEmpty()) {
+            delay(5_000)
+            walkBoxes = emptyList()
+        }
+    }
+    LaunchedEffect(pathsenseBoxes) {
+        if (pathsenseBoxes.isNotEmpty()) {
+            delay(5_000)
+            pathsenseBoxes = emptyList()
+        }
+    }
+
+    // ml inference — both models run every 3rd frame for fast detection
     LaunchedEffect(frameBitmap) {
         val bmp = frameBitmap ?: return@LaunchedEffect
         frameCounter++
-        val runPathsense  = frameCounter % 6 == 0
-        val runWalksignal = frameCounter % 6 == 3
+        val runPathsense  = frameCounter % 3 == 0
+        val runWalksignal = frameCounter % 3 == 0
         if (!runPathsense && !runWalksignal) return@LaunchedEffect
 
         withContext(Dispatchers.Default) {
             try {
-                // ── pathsense model ──────────────────────────────────────────
+                // ── pathsense model — 1 class only: crosswalk ───────────────
+                // model output is [1, 5, 8400] = 4 bbox + 1 class, so only class 0 exists
                 if (runPathsense) {
                     if (detectorRef[0] == null)
                         detectorRef[0] = YoloDetector(
                             context, "pathsense_pedestrian.tflite",
-                            labels = listOf(
-                                "crosswalk", "walk_signal", "stop_signal",
-                                "pedestrian_crossing_sign", "school_crossing_sign", "traffic_light"
-                            ),
-                            confidenceThreshold = 0.50f  // raised from 0.45 to reduce false positives
+                            labels = listOf("crosswalk"),
+                            confidenceThreshold = 0.40f
                         )
                     val detector = detectorRef[0] ?: return@withContext
-                    val boxes = detector.detect(bmp)
-                    val detectedClasses = boxes.map { it.classId }.toSet()
-                    val overlayBoxes = boxes.filter { it.classId in 0..2 }
+                    val rawBoxes = detector.detect(bmp)
+                    // reject tiny blips — real crosswalks must occupy some portion of frame
+                    val boxes = rawBoxes.filter { box ->
+                        (box.x2 - box.x1) > bmp.width  * 0.04f &&
+                        (box.y2 - box.y1) > bmp.height * 0.04f
+                    }
+                    val crosswalkHit = boxes.isNotEmpty()
 
                     withContext(Dispatchers.Main) {
-                        pathsenseBoxes = overlayBoxes
+                        pathsenseBoxes = boxes
 
-                        // soft-decay: single missed frame decrements by 1, not full reset
-                        if (1 in detectedClasses) consecutiveWalk = minOf(consecutiveWalk + 1, 8)
-                        else                      consecutiveWalk = maxOf(consecutiveWalk - 1, 0)
-                        if (2 in detectedClasses) consecutiveStop = minOf(consecutiveStop + 1, 8)
-                        else                      consecutiveStop = maxOf(consecutiveStop - 1, 0)
+                        // soft-decay counter for crosswalk confirmation
+                        if (crosswalkHit) consecutiveWalk = minOf(consecutiveWalk + 1, 10)
+                        else              consecutiveWalk = maxOf(consecutiveWalk - 1, 0)
 
-                        val confirmedWalk = consecutiveWalk >= 4
-                        val confirmedStop = consecutiveStop >= 4
-                        val chips = mutableListOf<Pair<String, Color>>()
-
-                        if (confirmedStop) {
-                            triggerDetection("stop_signal",
-                                "Stop. Do not cross. Wait for the walk signal.", "warning",
-                                "Stop. Do not cross.", urgent = true, cooldownMs = 8_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            chips.add("Stop Signal" to RedAlert)
-                        }
-                        if (confirmedWalk && !confirmedStop) {
-                            triggerDetection("walk_signal",
-                                "Walk sign is on. Safe to cross.", "safe",
-                                "Walk sign is on. Safe to cross.", urgent = true, cooldownMs = 8_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            chips.add("Walk Signal" to GreenOk)
-                        }
-                        if (0 in detectedClasses && !confirmedWalk && !confirmedStop) {
+                        if (consecutiveWalk >= 4) {
                             triggerDetection("crosswalk",
                                 "Crosswalk detected. Cross slowly, check both ways.", "caution",
-                                "Crosswalk ahead. Check traffic both ways.",
+                                "Crosswalk ahead. Check both ways.",
                                 urgent = false, cooldownMs = 12_000L,
                                 tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
                                 setLabel = { detectionLabel = it },
                                 setType  = { detectionType = it },
                                 setTime  = { lastDetectionTime = it })
-                            chips.add("Crosswalk" to YellowWarn)
+                            activeChips = listOf("Crosswalk" to YellowWarn)
                         }
-                        if (3 in detectedClasses) {
-                            triggerDetection("ped_sign",
-                                "Pedestrian crossing ahead", "info",
-                                "Pedestrian crossing ahead.",
-                                urgent = false, cooldownMs = 15_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            chips.add("Crossing Sign" to ElectricBlue)
-                        }
-                        if (4 in detectedClasses) {
-                            triggerDetection("school_sign",
-                                "School crossing zone. Reduced speed area.", "info",
-                                "School crossing zone ahead.",
-                                urgent = false, cooldownMs = 15_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            chips.add("School Zone" to YellowWarn)
-                        }
-                        if (chips.isNotEmpty()) activeChips = chips
                     }
                 }
 
@@ -1077,8 +1043,8 @@ fun CameraTab() {
                     if (wsDetectorRef[0] == null)
                         wsDetectorRef[0] = YoloDetector(
                             context, "walksignal.tflite",
-                            labels = listOf("walk", "wait"),
-                            confidenceThreshold = 0.68f  // strict — signals must be unambiguous
+                            labels = listOf("wait", "walk"),
+                            confidenceThreshold = 0.55f  // 55% — fast trigger with enough confidence
                         )
                     val wsBoxesRaw = wsDetectorRef[0]!!.detect(bmp)
                     // require meaningful box area (threshold already applied in YoloDetector)
@@ -1099,7 +1065,7 @@ fun CameraTab() {
 
                         val now = System.currentTimeMillis()
                         if (now > wsCooldownUntil) {
-                            if (consecWsWalk >= 5) {
+                            if (consecWsWalk >= 4) {
                                 wsCooldownUntil   = now + 60_000L
                                 consecWsWalk      = 0
                                 consecWsWait      = 0
@@ -1109,7 +1075,7 @@ fun CameraTab() {
                                 lastDetectionTime = now
                                 activeChips = activeChips.toMutableList()
                                     .also { it.add(0, "Walk Signal" to GreenOk) }
-                            } else if (consecWsWait >= 5) {
+                            } else if (consecWsWait >= 4) {
                                 wsCooldownUntil   = now + 60_000L
                                 consecWsWait      = 0
                                 consecWsWalk      = 0

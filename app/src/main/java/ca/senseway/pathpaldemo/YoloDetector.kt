@@ -30,10 +30,14 @@ class YoloDetector(
         }
         interpreter = Interpreter(model, options)
 
-        val inputShape = interpreter!!.getInputTensor(0).shape()
-        // shape is [1, H, W, C] — index 1 = height, 2 = width
+        val inputShape  = interpreter!!.getInputTensor(0).shape()
+        val outputShape = interpreter!!.getOutputTensor(0).shape()
         inputImageHeight = inputShape[1]
         inputImageWidth  = inputShape[2]
+        // log so we can verify class count at runtime
+        android.util.Log.d("YoloDetector",
+            "$modelPath — input${inputShape.toList()} output${outputShape.toList()} " +
+            "(${outputShape[1] - 4} class(es), ${outputShape[2]} anchors)")
     }
 
     fun detect(bitmap: Bitmap): List<BoundingBox> {
@@ -66,10 +70,10 @@ class YoloDetector(
             }
             if (bestScore < confidenceThreshold) continue
 
-            val cx = data[(0 * numAnchors) + i]
-            val cy = data[(1 * numAnchors) + i]
-            val w  = data[(2 * numAnchors) + i]
-            val h  = data[(3 * numAnchors) + i]
+            val cx = data[i]
+            val cy = data[numAnchors + i]
+            val w  = data[2 * numAnchors + i]
+            val h  = data[3 * numAnchors + i]
 
             // clamp to bitmap bounds
             val x1 = ((cx - w / 2f) * bitmap.width).coerceIn(0f, bitmap.width.toFloat())
@@ -84,107 +88,8 @@ class YoloDetector(
             boxes.add(BoundingBox(x1, y1, x2, y2, bestScore, label, bestClassIdx))
         }
 
-        val nmsResults = applyNms(boxes)
-
-        // zebra stripe filter — only for crosswalk detections, validates stripe pattern
-        return nmsResults.filter { box ->
-            if (box.label != "crosswalk") true
-            else hasZebraStripes(bitmap, box)
-        }
+        return applyNms(boxes)
     }
-
-    /**
-     * Validates that a detected box contains a real zebra crossing.
-     * Samples both horizontal AND vertical/diagonal scanlines so angled
-     * crosswalks are also accepted. A real crosswalk must show alternating
-     * bright/dark bands AND maintain a meaningful white-to-total ratio.
-     */
-    private fun hasZebraStripes(bitmap: Bitmap, box: BoundingBox): Boolean {
-        val x1 = box.x1.toInt().coerceIn(0, bitmap.width  - 1)
-        val y1 = box.y1.toInt().coerceIn(0, bitmap.height - 1)
-        val x2 = box.x2.toInt().coerceIn(0, bitmap.width  - 1)
-        val y2 = box.y2.toInt().coerceIn(0, bitmap.height - 1)
-        val boxW = x2 - x1
-        val boxH = y2 - y1
-        if (boxW < 12 || boxH < 12) return false
-
-        val hStep = (boxW / 20).coerceAtLeast(1)
-        val vStep = (boxH / 20).coerceAtLeast(1)
-        var totalTransitions = 0
-        var brightPixels     = 0
-        var totalPixels      = 0
-
-        // ── horizontal scanlines (7 lines through the box height) ────────────
-        for (si in 1..7) {
-            val py = y1 + (si * boxH / 8)
-            var prevBright = false
-            var lineT = 0
-            var first = true
-            for (px in x1 until x2 step hStep) {
-                val lum = luminance(bitmap.getPixel(px, py))
-                val bright = lum > 128
-                if (bright) brightPixels++
-                totalPixels++
-                if (!first && bright != prevBright) lineT++
-                prevBright = bright
-                first = false
-            }
-            totalTransitions += lineT
-        }
-
-        // ── vertical scanlines (5 lines through the box width) ────────────
-        // catches stripes that run top-to-bottom (standard crosswalk orientation)
-        for (si in 1..5) {
-            val px = x1 + (si * boxW / 6)
-            var prevBright = false
-            var lineT = 0
-            var first = true
-            for (py in y1 until y2 step vStep) {
-                val lum = luminance(bitmap.getPixel(px, py))
-                val bright = lum > 128
-                if (bright) brightPixels++
-                totalPixels++
-                if (!first && bright != prevBright) lineT++
-                prevBright = bright
-                first = false
-            }
-            totalTransitions += lineT
-        }
-
-        // ── diagonal scanline (top-left → bottom-right) ──────────────────
-        // catches 45-degree crosswalk shots from a perspective angle
-        val diagSteps = minOf(boxW, boxH) / hStep
-        if (diagSteps > 2) {
-            var prevBright = false
-            var lineT = 0
-            var first = true
-            for (step in 0 until diagSteps) {
-                val px = (x1 + step * boxW / diagSteps).coerceIn(x1, x2)
-                val py = (y1 + step * boxH / diagSteps).coerceIn(y1, y2)
-                val lum = luminance(bitmap.getPixel(px, py))
-                val bright = lum > 128
-                if (bright) brightPixels++
-                totalPixels++
-                if (!first && bright != prevBright) lineT++
-                prevBright = bright
-                first = false
-            }
-            totalTransitions += lineT
-        }
-
-        // normalise: transitions per scanline, across all 13+ lines sampled
-        val numLines    = 13.0
-        val avgT        = totalTransitions.toDouble() / numLines
-        val brightRatio = brightPixels.toDouble() / totalPixels.coerceAtLeast(1)
-
-        // needs at least 2 stripe alternations avg AND a plausible white/dark mix
-        return avgT >= 2.0 && brightRatio in 0.10..0.85
-    }
-
-    private fun luminance(pixel: Int): Int =
-        (0.299 * ((pixel shr 16) and 0xFF) +
-         0.587 * ((pixel shr 8)  and 0xFF) +
-         0.114 * (pixel          and 0xFF)).toInt()
 
     private fun applyNms(boxes: List<BoundingBox>): List<BoundingBox> {
         val sorted   = boxes.sortedByDescending { it.score }.toMutableList()
