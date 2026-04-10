@@ -8,6 +8,7 @@ import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.*
+import java.util.concurrent.TimeUnit
 
 // In-memory cookie store — persists the session cookie across all API calls.
 // Uses java.net.URI for host extraction to stay compatible with all OkHttp versions.
@@ -25,8 +26,11 @@ private val sessionCookieJar = object : CookieJar {
 }
 
 // Single OkHttpClient shared by the Senseway Retrofit instance
+// pingInterval keeps WebSocket alive through firewalls/idle periods — without it,
+// connections can silently die with no onFailure callback, meaning no auto-reconnect
 val sensewayHttpClient: OkHttpClient = OkHttpClient.Builder()
     .cookieJar(sessionCookieJar)
+    .pingInterval(20, TimeUnit.SECONDS)
     .build()
 
 // Senseway API (cookie-based session auth, mirrors web app credentials:include)

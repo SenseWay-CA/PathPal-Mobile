@@ -52,7 +52,7 @@ android {
 }
 
 dependencies {
-    // LiteRT (Google's rebrand of TFLite) — 16 KB aligned, faster than old org.tensorflow packages
+    // LiteRT (Google's rebrand of TFLite) — same org.tensorflow.lite.* API, newer runtime
     implementation("com.google.ai.edge.litert:litert:1.0.1")
     implementation("com.google.ai.edge.litert:litert-support:1.0.1")
 

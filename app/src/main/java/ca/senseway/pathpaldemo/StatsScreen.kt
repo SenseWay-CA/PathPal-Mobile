@@ -716,7 +716,6 @@ fun CameraTab() {
 
     // walk signal model state
     val wsDetectorRef   = remember { Array<YoloDetector?>(1) { null } }
-    val inferenceActive = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
     var walkBoxes     by remember { mutableStateOf<List<YoloDetector.BoundingBox>>(emptyList()) }
     var consecWsWalk  by remember { mutableIntStateOf(0) }
     var consecWsWait  by remember { mutableIntStateOf(0) }
@@ -808,11 +807,16 @@ fun CameraTab() {
 
                 private fun scheduleReconnect() {
                     if (cancelled) return
-                    mainHandler.post { if (!cancelled) connectionLabel = "Reconnecting..." }
-                    ttsInstance?.speak(
-                        "Stream disconnected. Reconnecting.",
-                        TextToSpeech.QUEUE_ADD, null, "disconnect"
-                    )
+                    mainHandler.post {
+                        if (!cancelled) {
+                            connectionLabel = "Reconnecting..."
+                            // TTS on main thread — TextToSpeech.speak() must be called from UI thread
+                            ttsInstance?.speak(
+                                "Stream disconnected. Reconnecting.",
+                                TextToSpeech.QUEUE_ADD, null, "disconnect"
+                            )
+                        }
+                    }
                     val r = Runnable { connect() }
                     reconnectRunnable = r
                     mainHandler.postDelayed(r, 3000L)
@@ -990,145 +994,109 @@ fun CameraTab() {
         }
     }
 
-    // ml inference — staggered: pathsense on even frames, walksignal on odd frames
-    // never both at once — keeps peak CPU load constant instead of spiking every 3rd frame
+    // ml inference — pathsense on even frames, walksignal on odd frames
     LaunchedEffect(frameBitmap) {
         val bmp = frameBitmap ?: return@LaunchedEffect
-        frameCounter++
-        val runPathsense  = frameCounter % 2 == 0
-        val runWalksignal = frameCounter % 2 == 1
-
-        // skip inference entirely on bad frames — blurry/blocked pixels produce garbage detections
         if (isBlurry || isBlocked) {
-            withContext(Dispatchers.Main) {
-                consecutiveWalk = maxOf(consecutiveWalk - 1, 0)
-                consecWsWalk    = maxOf(consecWsWalk - 1, 0)
-                consecWsWait    = maxOf(consecWsWait - 1, 0)
-            }
+            consecutiveWalk = 0
+            consecWsWalk    = 0
+            consecWsWait    = 0
             return@LaunchedEffect
         }
-
-        // drop frame if previous inference is still running — prevents CPU pileup on slow devices
-        if (!inferenceActive.compareAndSet(false, true)) return@LaunchedEffect
+        frameCounter++
 
         withContext(Dispatchers.Default) {
             try {
-                // ── pathsense model — 1 class only: crosswalk ───────────────
-                // model output is [1, 5, 8400] = 4 bbox + 1 class, so only class 0 exists
-                if (runPathsense) {
+                if (frameCounter % 2 == 0) {
+                    // ── pathsense model — crosswalk ──────────────────────────
                     if (detectorRef[0] == null)
-                        synchronized(detectorRef) {
-                            if (detectorRef[0] == null)
-                                detectorRef[0] = YoloDetector(
-                                    context, "pathsense_pedestrian.tflite",
-                                    labels = listOf("crosswalk"),
-                                    confidenceThreshold = 0.52f
-                                )
-                        }
-                    val detector = detectorRef[0] ?: return@withContext
-                    val rawBoxes = detector.detect(bmp)
-                    // reject tiny blips — real crosswalks must occupy some portion of frame
-                    val boxes = rawBoxes.filter { box ->
+                        detectorRef[0] = YoloDetector(
+                            context, "pathsense_pedestrian.tflite",
+                            labels = listOf("crosswalk"),
+                            confidenceThreshold = 0.50f
+                        )
+                    val boxes = detectorRef[0]!!.detect(bmp).filter { box ->
                         (box.x2 - box.x1) > bmp.width  * 0.06f &&
                         (box.y2 - box.y1) > bmp.height * 0.06f
                     }
-                    val topScore = boxes.maxOfOrNull { it.score } ?: 0f
-                    val crosswalkHit = boxes.isNotEmpty()
-
                     withContext(Dispatchers.Main) {
                         pathsenseBoxes = boxes
-
-                        // confidence-weighted: high confidence hits confirm faster
-                        if (crosswalkHit) {
-                            val inc = if (topScore >= 0.70f) 2 else 1
-                            consecutiveWalk = minOf(consecutiveWalk + inc, 10)
+                        if (boxes.isNotEmpty()) {
+                            consecutiveWalk++
+                            if (consecutiveWalk >= 3) {
+                                triggerDetection("crosswalk",
+                                    "Crosswalk detected. Cross slowly, check both ways.", "caution",
+                                    "Crosswalk ahead. Check both ways.",
+                                    urgent = false, cooldownMs = 12_000L,
+                                    tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
+                                    setLabel = { detectionLabel = it },
+                                    setType  = { detectionType = it },
+                                    setTime  = { lastDetectionTime = it })
+                                activeChips = listOf("Crosswalk" to YellowWarn)
+                            }
                         } else {
-                            consecutiveWalk = maxOf(consecutiveWalk - 1, 0)
-                        }
-
-                        if (consecutiveWalk >= 4) {
-                            triggerDetection("crosswalk",
-                                "Crosswalk detected. Cross slowly, check both ways.", "caution",
-                                "Crosswalk ahead. Check both ways.",
-                                urgent = false, cooldownMs = 12_000L,
-                                tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
-                                setLabel = { detectionLabel = it },
-                                setType  = { detectionType = it },
-                                setTime  = { lastDetectionTime = it })
-                            activeChips = listOf("Crosswalk" to YellowWarn)
+                            consecutiveWalk = 0
                         }
                     }
-                }
-
-                // ── walk signal model ────────────────────────────────────────
-                if (runWalksignal) {
+                } else {
+                    // ── walksignal model — wait / walk ───────────────────────
                     if (wsDetectorRef[0] == null)
-                        synchronized(wsDetectorRef) {
-                            if (wsDetectorRef[0] == null)
-                                wsDetectorRef[0] = YoloDetector(
-                                    context, "walksignal.tflite",
-                                    labels = listOf("wait", "walk"),
-                                    confidenceThreshold = 0.65f
-                                )
-                        }
-                    val wsDetector = wsDetectorRef[0] ?: return@withContext
-                    val wsBoxesRaw = wsDetector.detect(bmp)
-                    val wsBoxes = wsBoxesRaw.filter { box ->
+                        wsDetectorRef[0] = YoloDetector(
+                            context, "walksignal.tflite",
+                            labels = listOf("wait", "walk"),
+                            confidenceThreshold = 0.60f
+                        )
+                    val wsBoxes = wsDetectorRef[0]!!.detect(bmp).filter { box ->
                         (box.x2 - box.x1) > bmp.width  * 0.04f &&
                         (box.y2 - box.y1) > bmp.height * 0.04f
                     }
-                    val wsWalkScore = wsBoxes.filter { it.label == "walk" }.maxOfOrNull { it.score } ?: 0f
-                    val wsWaitScore = wsBoxes.filter { it.label == "wait" }.maxOfOrNull { it.score } ?: 0f
-                    val wsWalkHit  = wsWalkScore > 0f
-                    val wsWaitHit  = wsWaitScore > 0f
-
+                    val wsWalkHit = wsBoxes.any { it.label == "walk" }
+                    val wsWaitHit = wsBoxes.any { it.label == "wait" }
                     withContext(Dispatchers.Main) {
-                        // confidence-weighted: 75%+ confidence counts double
-                        if (wsWalkHit) consecWsWalk = minOf(consecWsWalk + if (wsWalkScore >= 0.75f) 2 else 1, 10)
-                        else           consecWsWalk = maxOf(consecWsWalk - 1, 0)
-                        if (wsWaitHit) consecWsWait = minOf(consecWsWait + if (wsWaitScore >= 0.75f) 2 else 1, 10)
-                        else           consecWsWait = maxOf(consecWsWait - 1, 0)
                         walkBoxes = wsBoxes
-
                         val now = System.currentTimeMillis()
-                        // walk and wait have independent cooldowns — changing signal always gets through
-                        if (consecWsWalk >= 4 && now > wsWalkCooldownUntil) {
-                            wsWalkCooldownUntil = now + 30_000L
-                            consecWsWalk        = 0
-                            consecWsWait        = 0
-                            soundPlayer.playWalk()
-                            detectionLabel    = "Walk sign is on. Safe to cross."
-                            detectionType     = "safe"
-                            lastDetectionTime = now
-                            activeChips = activeChips.toMutableList()
-                                .also { it.add(0, "Walk Signal" to GreenOk) }
-                            // TTS announcement — flush queue so it's heard immediately
-                            if (ttsReady) ttsInstance?.speak(
-                                "Walk sign on. Safe to cross.",
-                                TextToSpeech.QUEUE_FLUSH, null, "ws_walk_tts"
-                            )
-                        }
-                        if (consecWsWait >= 4 && now > wsWaitCooldownUntil) {
-                            wsWaitCooldownUntil = now + 15_000L
-                            consecWsWait        = 0
-                            consecWsWalk        = 0
-                            soundPlayer.playWait()
-                            detectionLabel    = "Wait. Do not cross."
-                            detectionType     = "warning"
-                            lastDetectionTime = now
-                            activeChips = activeChips.toMutableList()
-                                .also { it.add(0, "Wait" to RedAlert) }
-                            // TTS announcement — urgent, flush queue
-                            if (ttsReady) ttsInstance?.speak(
-                                "Wait. Do not cross.",
-                                TextToSpeech.QUEUE_FLUSH, null, "ws_wait_tts"
-                            )
+                        if (wsWalkHit) {
+                            consecWsWalk++
+                            consecWsWait = 0
+                            if (consecWsWalk >= 3 && now > wsWalkCooldownUntil) {
+                                wsWalkCooldownUntil = now + 30_000L
+                                consecWsWalk        = 0
+                                soundPlayer.playWalk()
+                                detectionLabel    = "Walk sign is on. Safe to cross."
+                                detectionType     = "safe"
+                                lastDetectionTime = now
+                                activeChips = activeChips.toMutableList()
+                                    .also { it.add(0, "Walk Signal" to GreenOk) }
+                                if (ttsReady) ttsInstance?.speak(
+                                    "Walk sign on. Safe to cross.",
+                                    TextToSpeech.QUEUE_FLUSH, null, "ws_walk_tts"
+                                )
+                            }
+                        } else if (wsWaitHit) {
+                            consecWsWait++
+                            consecWsWalk = 0
+                            if (consecWsWait >= 3 && now > wsWaitCooldownUntil) {
+                                wsWaitCooldownUntil = now + 15_000L
+                                consecWsWait        = 0
+                                soundPlayer.playWait()
+                                detectionLabel    = "Wait. Do not cross."
+                                detectionType     = "warning"
+                                lastDetectionTime = now
+                                activeChips = activeChips.toMutableList()
+                                    .also { it.add(0, "Wait" to RedAlert) }
+                                if (ttsReady) ttsInstance?.speak(
+                                    "Wait. Do not cross.",
+                                    TextToSpeech.QUEUE_FLUSH, null, "ws_wait_tts"
+                                )
+                            }
+                        } else {
+                            consecWsWalk = 0
+                            consecWsWait = 0
                         }
                     }
                 }
-            } catch (_: Exception) {
-            } finally {
-                inferenceActive.set(false)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
             }
         }
     }
