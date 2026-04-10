@@ -720,7 +720,8 @@ fun CameraTab() {
     var walkBoxes     by remember { mutableStateOf<List<YoloDetector.BoundingBox>>(emptyList()) }
     var consecWsWalk  by remember { mutableIntStateOf(0) }
     var consecWsWait  by remember { mutableIntStateOf(0) }
-    var wsCooldownUntil by remember { mutableLongStateOf(0L) }
+    var wsWalkCooldownUntil by remember { mutableLongStateOf(0L) }
+    var wsWaitCooldownUntil by remember { mutableLongStateOf(0L) }
     val soundPlayer   = remember { WalkSignalSoundPlayer(context) }
 
     // one-shot status fetch before websocket connects
@@ -1003,11 +1004,14 @@ fun CameraTab() {
                 // model output is [1, 5, 8400] = 4 bbox + 1 class, so only class 0 exists
                 if (runPathsense) {
                     if (detectorRef[0] == null)
-                        detectorRef[0] = YoloDetector(
-                            context, "pathsense_pedestrian.tflite",
-                            labels = listOf("crosswalk"),
-                            confidenceThreshold = 0.40f
-                        )
+                        synchronized(detectorRef) {
+                            if (detectorRef[0] == null)
+                                detectorRef[0] = YoloDetector(
+                                    context, "pathsense_pedestrian.tflite",
+                                    labels = listOf("crosswalk"),
+                                    confidenceThreshold = 0.40f
+                                )
+                        }
                     val detector = detectorRef[0] ?: return@withContext
                     val rawBoxes = detector.detect(bmp)
                     // reject tiny blips — real crosswalks must occupy some portion of frame
@@ -1041,13 +1045,15 @@ fun CameraTab() {
                 // ── walk signal model ────────────────────────────────────────
                 if (runWalksignal) {
                     if (wsDetectorRef[0] == null)
-                        wsDetectorRef[0] = YoloDetector(
-                            context, "walksignal.tflite",
-                            labels = listOf("wait", "walk"),
-                            confidenceThreshold = 0.55f  // 55% — fast trigger with enough confidence
-                        )
+                        synchronized(wsDetectorRef) {
+                            if (wsDetectorRef[0] == null)
+                                wsDetectorRef[0] = YoloDetector(
+                                    context, "walksignal.tflite",
+                                    labels = listOf("wait", "walk"),
+                                    confidenceThreshold = 0.55f
+                                )
+                        }
                     val wsBoxesRaw = wsDetectorRef[0]!!.detect(bmp)
-                    // require meaningful box area (threshold already applied in YoloDetector)
                     val wsBoxes = wsBoxesRaw.filter { box ->
                         (box.x2 - box.x1) > bmp.width  * 0.04f &&
                         (box.y2 - box.y1) > bmp.height * 0.04f
@@ -1056,7 +1062,6 @@ fun CameraTab() {
                     val wsWaitHit = wsBoxes.any { it.label == "wait" }
 
                     withContext(Dispatchers.Main) {
-                        // soft-decay counters
                         if (wsWalkHit) consecWsWalk = minOf(consecWsWalk + 1, 10)
                         else           consecWsWalk = maxOf(consecWsWalk - 1, 0)
                         if (wsWaitHit) consecWsWait = minOf(consecWsWait + 1, 10)
@@ -1064,28 +1069,28 @@ fun CameraTab() {
                         walkBoxes = wsBoxes
 
                         val now = System.currentTimeMillis()
-                        if (now > wsCooldownUntil) {
-                            if (consecWsWalk >= 4) {
-                                wsCooldownUntil   = now + 60_000L
-                                consecWsWalk      = 0
-                                consecWsWait      = 0
-                                soundPlayer.playWalk()
-                                detectionLabel    = "Walk sign is on. Safe to cross."
-                                detectionType     = "safe"
-                                lastDetectionTime = now
-                                activeChips = activeChips.toMutableList()
-                                    .also { it.add(0, "Walk Signal" to GreenOk) }
-                            } else if (consecWsWait >= 4) {
-                                wsCooldownUntil   = now + 60_000L
-                                consecWsWait      = 0
-                                consecWsWalk      = 0
-                                soundPlayer.playWait()
-                                detectionLabel    = "Wait. Do not cross."
-                                detectionType     = "warning"
-                                lastDetectionTime = now
-                                activeChips = activeChips.toMutableList()
-                                    .also { it.add(0, "Wait" to RedAlert) }
-                            }
+                        // walk and wait have independent cooldowns — changing signal always gets through
+                        if (consecWsWalk >= 4 && now > wsWalkCooldownUntil) {
+                            wsWalkCooldownUntil = now + 30_000L  // 30s cooldown for walk
+                            consecWsWalk        = 0
+                            consecWsWait        = 0
+                            soundPlayer.playWalk()
+                            detectionLabel    = "Walk sign is on. Safe to cross."
+                            detectionType     = "safe"
+                            lastDetectionTime = now
+                            activeChips = activeChips.toMutableList()
+                                .also { it.add(0, "Walk Signal" to GreenOk) }
+                        }
+                        if (consecWsWait >= 4 && now > wsWaitCooldownUntil) {
+                            wsWaitCooldownUntil = now + 15_000L  // 15s cooldown for wait (urgent)
+                            consecWsWait        = 0
+                            consecWsWalk        = 0
+                            soundPlayer.playWait()
+                            detectionLabel    = "Wait. Do not cross."
+                            detectionType     = "warning"
+                            lastDetectionTime = now
+                            activeChips = activeChips.toMutableList()
+                                .also { it.add(0, "Wait" to RedAlert) }
                         }
                     }
                 }
