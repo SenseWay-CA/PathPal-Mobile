@@ -36,7 +36,6 @@ class YoloDetector(
     fun detect(bitmap: Bitmap): List<BoundingBox> {
         val interp = interpreter ?: return emptyList()
 
-        // preprocess: resize + normalize 0-255 → 0-1
         val imageProcessor = ImageProcessor.Builder()
             .add(ResizeOp(inputImageHeight, inputImageWidth, ResizeOp.ResizeMethod.BILINEAR))
             .add(NormalizeOp(0f, 255f))
@@ -49,14 +48,13 @@ class YoloDetector(
         val outputBuffer = TensorBuffer.createFixedSize(outputShape, org.tensorflow.lite.DataType.FLOAT32)
         interp.run(tensorImage.buffer, outputBuffer.buffer.rewind())
 
-        val data          = outputBuffer.floatArray
-        val numAnchors    = outputShape[2]   // 8400 for yolov8n
-        val numFeatures   = outputShape[1]   // 4 bbox + num_classes
-        val numClasses    = numFeatures - 4
-        val boxes         = mutableListOf<BoundingBox>()
+        val data       = outputBuffer.floatArray
+        val numAnchors = outputShape[2]
+        val numFeatures= outputShape[1]
+        val numClasses = numFeatures - 4
+        val boxes      = mutableListOf<BoundingBox>()
 
         for (i in 0 until numAnchors) {
-            // find best class score across all class channels
             var bestScore    = 0f
             var bestClassIdx = 0
             for (c in 0 until numClasses) {
@@ -78,7 +76,57 @@ class YoloDetector(
             val label = labels.getOrElse(bestClassIdx) { "class_$bestClassIdx" }
             boxes.add(BoundingBox(x1, y1, x2, y2, bestScore, label, bestClassIdx))
         }
-        return applyNms(boxes)
+
+        val nmsResults = applyNms(boxes)
+
+        // zebra stripe filter — reject crosswalk detections that lack alternating white/dark bands
+        return nmsResults.filter { box ->
+            if (box.label != "crosswalk") true
+            else hasZebraStripes(bitmap, box)
+        }
+    }
+
+    // checks that a bounding box region contains typical zebra crossing stripe patterns
+    private fun hasZebraStripes(bitmap: Bitmap, box: BoundingBox): Boolean {
+        val x1 = box.x1.toInt().coerceIn(0, bitmap.width  - 1)
+        val y1 = box.y1.toInt().coerceIn(0, bitmap.height - 1)
+        val x2 = box.x2.toInt().coerceIn(0, bitmap.width  - 1)
+        val y2 = box.y2.toInt().coerceIn(0, bitmap.height - 1)
+        val boxW = x2 - x1
+        val boxH = y2 - y1
+        if (boxW < 12 || boxH < 12) return false
+
+        val step = (boxW / 18).coerceAtLeast(1)
+        var totalTransitions = 0
+        var brightPixels     = 0
+        var totalPixels      = 0
+
+        // sample 7 horizontal scanlines through the box
+        for (si in 1..7) {
+            val py = y1 + (si * boxH / 8)
+            var prevBright = false
+            var lineT = 0
+            var first = true
+            for (px in x1 until x2 step step) {
+                val p   = bitmap.getPixel(px, py)
+                val lum = (0.299 * ((p shr 16) and 0xFF) +
+                           0.587 * ((p shr 8)  and 0xFF) +
+                           0.114 * (p          and 0xFF)).toInt()
+                val bright = lum > 130
+                if (bright) brightPixels++
+                totalPixels++
+                if (!first && bright != prevBright) lineT++
+                prevBright = bright
+                first = false
+            }
+            totalTransitions += lineT
+        }
+
+        val avgT        = totalTransitions.toDouble() / 7.0
+        val brightRatio = brightPixels.toDouble() / totalPixels.coerceAtLeast(1)
+
+        // must have stripe alternation and a meaningful white region
+        return avgT >= 2.5 && brightRatio in 0.12..0.82
     }
 
     private fun applyNms(boxes: List<BoundingBox>): List<BoundingBox> {

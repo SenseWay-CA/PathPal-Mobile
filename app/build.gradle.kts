@@ -67,6 +67,9 @@ dependencies {
     
     // Material Icons
     implementation("androidx.compose.material:material-icons-extended:1.7.5")
+
+    // Coil — async image loading (avatar)
+    implementation("io.coil-kt:coil-compose:2.7.0")
     
     // OpenStreetMap (osmdroid) - Free maps, no API key needed
     implementation("org.osmdroid:osmdroid-android:6.1.18")

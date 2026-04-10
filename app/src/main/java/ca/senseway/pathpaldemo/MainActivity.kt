@@ -19,10 +19,16 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
@@ -46,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.graphics.asImageBitmap
 import org.osmdroid.config.Configuration
 
 class MainActivity : ComponentActivity() {
@@ -94,18 +101,40 @@ fun MainApp(viewModel: AppViewModel) {
     var currentTab   by remember { mutableIntStateOf(0) }
     var showUserMenu by remember { mutableStateOf(false) }
 
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+
     // Request POST_NOTIFICATIONS permission on Android 13+
     if (Build.VERSION.SDK_INT >= 33) {
-        val ctx = androidx.compose.ui.platform.LocalContext.current
         val notifLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestPermission()
-        ) { /* result not needed — we silently fail-safe in NotificationHelper */ }
+        ) { /* silently fail-safe */ }
         LaunchedEffect(Unit) {
             if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED
             ) {
                 notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
+        }
+    }
+
+    // Request location permission and start GPS tracking
+    val locationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { perms ->
+        val granted = perms[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                      perms[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        viewModel.onLocationPermissionResult(ctx, granted)
+    }
+    LaunchedEffect(Unit) {
+        val hasFine   = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION)   == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (hasFine || hasCoarse) {
+            viewModel.onLocationPermissionResult(ctx, true)
+        } else {
+            locationLauncher.launch(arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ))
         }
     }
 
@@ -147,7 +176,7 @@ fun MainApp(viewModel: AppViewModel) {
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 viewModel.notifications.take(2).forEach { notif ->
-                    NotifBanner(notif) { viewModel.dismissNotification(notif.id) }
+                    DismissibleNotifBanner(notif) { viewModel.dismissNotification(notif.id) }
                 }
             }
         }
@@ -160,6 +189,7 @@ fun MainApp(viewModel: AppViewModel) {
         )
 
         // Profile avatar button (top-right)
+        val avatarBmp = viewModel.avatarBitmap
         Box(
             Modifier
                 .align(Alignment.TopEnd)
@@ -170,7 +200,16 @@ fun MainApp(viewModel: AppViewModel) {
                 .clickable { showUserMenu = true },
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Default.AccountCircle, "Profile", tint = TextWhite, modifier = Modifier.size(24.dp))
+            if (avatarBmp != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = avatarBmp.asImageBitmap(),
+                    contentDescription = "Profile",
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Text(viewModel.displayInitial, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextWhite)
+            }
         }
 
         // User profile dialog
@@ -188,16 +227,22 @@ fun MainApp(viewModel: AppViewModel) {
                             Box(
                                 Modifier
                                     .size(48.dp)
+                                    .clip(CircleShape)
                                     .background(
-                                        Brush.linearGradient(listOf(ElectricBlue, VioletAccent)),
-                                        CircleShape
+                                        Brush.linearGradient(listOf(ElectricBlue, VioletAccent))
                                     ),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    viewModel.displayInitial,
-                                    fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White
-                                )
+                                if (avatarBmp != null) {
+                                    androidx.compose.foundation.Image(
+                                        bitmap = avatarBmp.asImageBitmap(),
+                                        contentDescription = "Avatar",
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Text(viewModel.displayInitial, fontSize = 22.sp, fontWeight = FontWeight.Black, color = Color.White)
+                                }
                             }
                             Spacer(Modifier.width(12.dp))
                             Column {
@@ -218,6 +263,28 @@ fun MainApp(viewModel: AppViewModel) {
                                     Text("Online", fontSize = 12.sp, color = GreenOk)
                                 }
                             }
+                        }
+
+                        HorizontalDivider(color = CardBorder)
+
+                        // BT status row
+                        val btColor = when (viewModel.btStatus) {
+                            "Connected"     -> GreenOk
+                            "Connecting..." -> Color(0xFFFFB830)
+                            "Failed", "Bluetooth Off" -> RedAlert
+                            else            -> TextMuted
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Bluetooth, null, tint = btColor, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Bluetooth", fontSize = 12.sp, color = TextMuted)
+                            }
+                            Text(viewModel.btStatus, fontSize = 12.sp, color = btColor, fontWeight = FontWeight.SemiBold)
                         }
 
                         HorizontalDivider(color = CardBorder)
@@ -388,6 +455,69 @@ fun NotifBanner(notification: AppNotification, onDismiss: () -> Unit) {
     }
     Surface(
         Modifier.fillMaxWidth(),
+        shape           = RoundedCornerShape(16.dp),
+        color           = PanelPurple,
+        shadowElevation = 12.dp,
+        border          = BorderStroke(1.dp, color.copy(alpha = 0.4f))
+    ) {
+        Row(
+            Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, null, tint = color, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(notification.title,   fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
+                Text(notification.message, fontSize = 12.sp, color = TextMuted)
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Default.Close, null, tint = TextMuted, modifier = Modifier.size(14.dp))
+            }
+        }
+    }
+}
+
+@Composable
+fun DismissibleNotifBanner(notification: AppNotification, onDismiss: () -> Unit) {
+    val offsetY = remember { Animatable(0f) }
+    val scope   = rememberCoroutineScope()
+
+    // auto-dismiss after 5 seconds
+    LaunchedEffect(notification.id) {
+        delay(5_000L)
+        onDismiss()
+    }
+
+    val (color, icon) = when (notification.type) {
+        NotifType.SUCCESS -> GreenOk      to Icons.Default.CheckCircle
+        NotifType.ALERT   -> RedAlert     to Icons.Default.Error
+        NotifType.INFO    -> ElectricBlue to Icons.Default.Info
+    }
+
+    Surface(
+        Modifier
+            .fillMaxWidth()
+            .offset { IntOffset(0, offsetY.value.toInt()) }
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onVerticalDrag = { change, dragAmount ->
+                        change.consume()
+                        if (dragAmount < 0f) {
+                            scope.launch { offsetY.snapTo(offsetY.value + dragAmount) }
+                        }
+                    },
+                    onDragEnd = {
+                        scope.launch {
+                            if (offsetY.value < -60f) {
+                                offsetY.animateTo(-600f, tween(220))
+                                onDismiss()
+                            } else {
+                                offsetY.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
+                            }
+                        }
+                    }
+                )
+            },
         shape           = RoundedCornerShape(16.dp),
         color           = PanelPurple,
         shadowElevation = 12.dp,

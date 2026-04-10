@@ -21,7 +21,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -128,130 +131,250 @@ fun StatsScreen(viewModel: AppViewModel) {
 
 @Composable
 fun SensorsTab(viewModel: AppViewModel) {
-    val infiniteTransition = rememberInfiniteTransition(label = "sensors")
-
-    val accelX by infiniteTransition.animateFloat(
-        initialValue = -0.48f, targetValue = 0.52f,
-        animationSpec = infiniteRepeatable(tween(3200, easing = LinearEasing), RepeatMode.Reverse),
-        label = "aX"
-    )
-    val accelY by infiniteTransition.animateFloat(
-        initialValue = 0.31f, targetValue = -0.42f,
-        animationSpec = infiniteRepeatable(tween(2700, easing = LinearEasing), RepeatMode.Reverse),
-        label = "aY"
-    )
-    val accelZ by infiniteTransition.animateFloat(
-        initialValue = 9.74f, targetValue = 9.87f,
-        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Reverse),
-        label = "aZ"
-    )
-    val gyroAngle by infiniteTransition.animateFloat(
-        initialValue = 0f, targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(7000, easing = LinearEasing), RepeatMode.Restart),
-        label = "gyroAngle"
-    )
-    val gyroPitch by infiniteTransition.animateFloat(
-        initialValue = 0f, targetValue = 18f,
-        animationSpec = infiniteRepeatable(tween(2900, easing = LinearEasing), RepeatMode.Reverse),
-        label = "gyroPitch"
-    )
+    val accelX = viewModel.accelerometerX.toFloat()
+    val accelY = viewModel.accelerometerY.toFloat()
+    val accelZ = viewModel.accelerometerZ.toFloat()
+    val gX     = viewModel.gyroX.toFloat()
+    val gY     = viewModel.gyroY.toFloat()
+    val gZ     = viewModel.gyroZ.toFloat()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         contentPadding = PaddingValues(vertical = 16.dp)
     ) {
-        item {
-            SensorSectionHeader("Accelerometer", Icons.Default.Speed, ElectricBlue)
-        }
-        item {
-            AccelerometerViz(x = accelX, y = accelY, z = accelZ)
-        }
+        // bluetooth status card
+        item { BluetoothStatusCard(viewModel) }
+
+        item { Spacer(Modifier.height(2.dp)) }
+
+        // accelerometer section
+        item { SensorSectionHeader("Accelerometer", Icons.Default.Speed, ElectricBlue) }
+        item { AccelerometerViz(x = accelX, y = accelY, z = accelZ) }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SensorChip("X", "${String.format(Locale.US, "%.2f", accelX)} m/s²", ElectricBlue, Modifier.weight(1f))
-                SensorChip("Y", "${String.format(Locale.US, "%.2f", accelY)} m/s²", VioletAccent, Modifier.weight(1f))
-                SensorChip("Z", "${String.format(Locale.US, "%.2f", accelZ)} m/s²", GreenOk, Modifier.weight(1f))
+                SensorChip("X", String.format(Locale.US, "%.2f", accelX), ElectricBlue, Modifier.weight(1f))
+                SensorChip("Y", String.format(Locale.US, "%.2f", accelY), VioletAccent, Modifier.weight(1f))
+                SensorChip("Z", String.format(Locale.US, "%.2f", accelZ), GreenOk,      Modifier.weight(1f))
             }
         }
-
-        item { Spacer(Modifier.height(6.dp)) }
-
         item {
-            SensorSectionHeader("Gyroscope", Icons.Default.Autorenew, VioletAccent)
+            val mag = kotlin.math.sqrt((accelX * accelX + accelY * accelY + accelZ * accelZ).toDouble())
+            AccelMagnitudeBar(magnitude = mag.toFloat())
         }
-        item {
-            GyroscopeViz(angle = gyroAngle, pitch = gyroPitch)
-        }
+
+        item { Spacer(Modifier.height(4.dp)) }
+
+        // gyroscope section
+        item { SensorSectionHeader("Gyroscope", Icons.Default.Autorenew, VioletAccent) }
+        item { GyroscopeViz(gx = gX, gy = gY, gz = gZ) }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SensorChip("Roll", "${String.format(Locale.US, "%.1f", gyroAngle % 360)}°", ElectricBlue, Modifier.weight(1f))
-                SensorChip("Pitch", "${String.format(Locale.US, "%.1f", gyroPitch)}°", VioletAccent, Modifier.weight(1f))
-                SensorChip("Yaw", "0.0°", GreenOk, Modifier.weight(1f))
+                SensorChip("X", String.format(Locale.US, "%.2f", gX), ElectricBlue, Modifier.weight(1f))
+                SensorChip("Y", String.format(Locale.US, "%.2f", gY), VioletAccent, Modifier.weight(1f))
+                SensorChip("Z", String.format(Locale.US, "%.2f", gZ), GreenOk,      Modifier.weight(1f))
             }
         }
 
-        item { Spacer(Modifier.height(6.dp)) }
+        item { Spacer(Modifier.height(4.dp)) }
 
-        item {
-            SensorSectionHeader("Device Stats", Icons.Default.BarChart, YellowWarn)
-        }
+        // lidar section
+        item { SensorSectionHeader("LiDAR Distance", Icons.Default.Radar, YellowWarn) }
+        item { LidarCard(distanceCm = viewModel.lidarDistance) }
+
+        item { Spacer(Modifier.height(4.dp)) }
+
+        // device stats
+        item { SensorSectionHeader("Device Stats", Icons.Default.BarChart, GreenOk) }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatDataCard(
-                    Modifier.weight(1f),
-                    label = "Battery",
-                    value = "${viewModel.battery}%",
-                    sub = "Health 100%",
-                    color = GreenOk
-                )
-                StatDataCard(
-                    Modifier.weight(1f),
-                    label = "Heart Rate",
-                    value = "${viewModel.heartRate} bpm",
-                    sub = "Latest reading",
-                    color = Color(0xFFFF6B8A)
-                )
+                StatDataCard(Modifier.weight(1f), "Battery",    "${viewModel.battery}%", "Device power", GreenOk)
+                StatDataCard(Modifier.weight(1f), "Heart Rate",
+                    if (viewModel.heartRate > 0) "${viewModel.heartRate} bpm" else "-- bpm",
+                    "From Bluetooth", Color(0xFFFF6B8A))
             }
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatDataCard(
-                    Modifier.weight(1f),
-                    label = "Signal RSSI",
-                    value = "-62 dBm",
-                    sub = "RF signal strength",
-                    color = ElectricBlue
-                )
-                StatDataCard(
-                    Modifier.weight(1f),
-                    label = "Altitude",
-                    value = if (!viewModel.elevation.isNaN()) "${viewModel.elevation.toInt()} m" else "-- m",
-                    sub = "Above sea level",
-                    color = VioletAccent
-                )
+                StatDataCard(Modifier.weight(1f), "Latitude",
+                    String.format(Locale.US, "%.4f°", viewModel.latitude), "GPS", YellowWarn)
+                StatDataCard(Modifier.weight(1f), "Longitude",
+                    String.format(Locale.US, "%.4f°", viewModel.longitude), "GPS", YellowWarn)
             }
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatDataCard(
-                    Modifier.weight(1f),
-                    label = "Latitude",
-                    value = String.format(Locale.US, "%.4f", viewModel.latitude),
-                    sub = "GPS coordinate",
-                    color = YellowWarn
-                )
-                StatDataCard(
-                    Modifier.weight(1f),
-                    label = "Longitude",
-                    value = String.format(Locale.US, "%.4f", viewModel.longitude),
-                    sub = "GPS coordinate",
-                    color = YellowWarn
-                )
+                StatDataCard(Modifier.weight(1f), "Altitude",
+                    if (!viewModel.elevation.isNaN()) "${viewModel.elevation.toInt()} m" else "-- m",
+                    "Above sea level", ElectricBlue)
+                StatDataCard(Modifier.weight(1f), "Temperature",
+                    if (!viewModel.temperature.isNaN()) "${viewModel.temperature.toInt()}°C" else "-- °C",
+                    "Current weather", Color(0xFFFFB830))
             }
         }
 
         item { Spacer(Modifier.height(80.dp)) }
+    }
+}
+
+@Composable
+fun BluetoothStatusCard(viewModel: AppViewModel) {
+    val connected = viewModel.btStatus == "Connected"
+    val color = when (viewModel.btStatus) {
+        "Connected"    -> GreenOk
+        "Connecting..."-> YellowWarn
+        "Failed"       -> RedAlert
+        else           -> TextMuted
+    }
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape  = RoundedCornerShape(18.dp),
+        color  = color.copy(alpha = 0.07f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.28f))
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(40.dp).background(color.copy(alpha = 0.15f), RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.Bluetooth, null, tint = color, modifier = Modifier.size(20.dp))
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text("BLUETOOTH", fontSize = 11.sp, color = color, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp)
+                Text(viewModel.btStatus, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
+                Text("PathPal Pi  •  ${viewModel.btMacAddress}", fontSize = 11.sp, color = TextMuted)
+            }
+            if (connected) {
+                PulsingOnlineDot()
+            } else if (viewModel.btStatus != "Connecting...") {
+                TextButton(
+                    onClick = { viewModel.connectBluetooth() },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text("Connect", fontSize = 12.sp, color = ElectricBlue, fontWeight = FontWeight.SemiBold)
+                }
+            } else {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = YellowWarn,
+                    strokeWidth = 2.dp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun AccelMagnitudeBar(magnitude: Float) {
+    val maxG = 20f
+    val frac = (magnitude / maxG).coerceIn(0f, 1f)
+    val color = when {
+        magnitude > 15f -> RedAlert
+        magnitude > 10f -> YellowWarn
+        else            -> GreenOk
+    }
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape  = RoundedCornerShape(12.dp),
+        color  = PanelPurple,
+        border = BorderStroke(1.dp, CardBorder)
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("G-Force", fontSize = 11.sp, color = TextMuted)
+                Text(String.format(Locale.US, "%.2f m/s²", magnitude), fontSize = 11.sp, color = color, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(6.dp))
+            Box(
+                Modifier.fillMaxWidth().height(6.dp).background(CardBorder, RoundedCornerShape(3.dp))
+            ) {
+                Box(
+                    Modifier.fillMaxWidth(frac).fillMaxHeight()
+                        .background(
+                            Brush.horizontalGradient(listOf(ElectricBlue, color)),
+                            RoundedCornerShape(3.dp)
+                        )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun LidarCard(distanceCm: Double) {
+    val maxCm = 400.0
+    val frac  = (distanceCm / maxCm).coerceIn(0.0, 1.0).toFloat()
+    val color = when {
+        distanceCm < 50  -> RedAlert
+        distanceCm < 120 -> YellowWarn
+        else             -> GreenOk
+    }
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape  = RoundedCornerShape(20.dp),
+        color  = PanelPurple2,
+        border = BorderStroke(1.dp, CardBorder)
+    ) {
+        Row(
+            Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // sonar arc indicator
+            Canvas(Modifier.size(90.dp)) {
+                val cx = size.width / 2
+                val cy = size.height / 2
+                val r  = size.minDimension / 2 - 4.dp.toPx()
+                // grid rings
+                for (i in 1..3) {
+                    drawCircle(CardBorder.copy(alpha = 0.5f), r * i / 3, Offset(cx, cy),
+                        style = Stroke(1f))
+                }
+                // filled arc showing distance
+                drawArc(
+                    color      = color.copy(alpha = 0.18f),
+                    startAngle = 150f,
+                    sweepAngle = 240f * frac,
+                    useCenter  = true,
+                    topLeft    = Offset(cx - r, cy - r),
+                    size       = Size(r * 2, r * 2)
+                )
+                drawArc(
+                    color      = color.copy(alpha = 0.8f),
+                    startAngle = 150f,
+                    sweepAngle = 240f * frac,
+                    useCenter  = false,
+                    topLeft    = Offset(cx - r, cy - r),
+                    size       = Size(r * 2, r * 2),
+                    style      = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
+                )
+                drawCircle(color, 6.dp.toPx(), Offset(cx, cy))
+            }
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Distance", fontSize = 11.sp, color = TextMuted)
+                if (distanceCm > 0) {
+                    Text(
+                        String.format(Locale.US, "%.1f cm", distanceCm),
+                        fontSize = 26.sp, fontWeight = FontWeight.Bold, color = color
+                    )
+                    Text(
+                        when {
+                            distanceCm < 50  -> "Obstacle very close"
+                            distanceCm < 120 -> "Obstacle nearby"
+                            else             -> "Path clear"
+                        },
+                        fontSize = 12.sp, color = TextMuted
+                    )
+                } else {
+                    Text("-- cm", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = TextMuted)
+                    Text("No reading", fontSize = 12.sp, color = TextMuted)
+                }
+            }
+        }
     }
 }
 
@@ -313,7 +436,9 @@ fun AccelerometerViz(x: Float, y: Float, @Suppress("UNUSED_PARAMETER") z: Float)
 }
 
 @Composable
-fun GyroscopeViz(angle: Float, pitch: Float) {
+fun GyroscopeViz(gx: Float, gy: Float, gz: Float) {
+    val angle = Math.toDegrees(kotlin.math.atan2(gx.toDouble(), gy.toDouble())).toFloat()
+    val pitch = (gz / 10f).coerceIn(-90f, 90f)
     Surface(
         Modifier.fillMaxWidth().height(190.dp),
         shape = RoundedCornerShape(20.dp),
@@ -557,7 +682,7 @@ fun EventsTab(viewModel: AppViewModel) {
     }
 }
 
-// ── Camera Tab ──────────────────────────────────────────────────────────────
+// Camera Tab
 
 private const val STREAM_BASE    = "https://api.senseway.ca"
 private const val STREAM_STATUS  = "$STREAM_BASE/stream/status"
@@ -566,11 +691,13 @@ private const val STREAM_WS      = "wss://api.senseway.ca/ws/stream"
 @Composable
 fun CameraTab() {
     // stream state
-    var streaming       by remember { mutableStateOf(false) }
-    var viewers         by remember { mutableIntStateOf(0) }
-    var frameBitmap     by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var connectionLabel by remember { mutableStateOf("Connecting...") }
-    val mainHandler     = remember { Handler(Looper.getMainLooper()) }
+    var streaming         by remember { mutableStateOf(false) }
+    var viewers           by remember { mutableIntStateOf(0) }
+    var frameBitmap       by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var connectionLabel   by remember { mutableStateOf("Connecting...") }
+    val mainHandler       = remember { Handler(Looper.getMainLooper()) }
+    var lastFrameReceivedAt by remember { mutableLongStateOf(0L) }
+    var frameStagnant     by remember { mutableStateOf(false) }
 
     // pathsense detection state
     var detectionLabel     by remember { mutableStateOf<String?>(null) }
@@ -641,7 +768,14 @@ fun CameraTab() {
                     val arr = bytes.toByteArray()
                     val bmp = BitmapFactory.decodeByteArray(arr, 0, arr.size) ?: return
                     mainHandler.post {
-                        if (!cancelled) frameBitmap = bmp
+                        if (!cancelled) {
+                            frameBitmap = bmp
+                            lastFrameReceivedAt = System.currentTimeMillis()
+                            if (frameStagnant) {
+                                frameStagnant = false
+                                if (connectionLabel == "No Signal") connectionLabel = "Live"
+                            }
+                        }
                     }
                 }
 
@@ -654,9 +788,16 @@ fun CameraTab() {
                         val c = json.optInt("clients", 0)
                         mainHandler.post {
                             if (!cancelled) {
-                                streaming       = s
-                                viewers         = c
-                                connectionLabel = if (s) "Live" else "Offline"
+                                streaming = s
+                                viewers   = c
+                                if (!s) {
+                                    connectionLabel = "Offline"
+                                    frameBitmap     = null
+                                    frameStagnant   = false
+                                    lastFrameReceivedAt = 0L
+                                } else if (connectionLabel != "No Signal") {
+                                    connectionLabel = "Live"
+                                }
                             }
                         }
                     } catch (_: Exception) {}
@@ -711,6 +852,22 @@ fun CameraTab() {
             ttsInstance = null
             tts?.stop()
             tts?.shutdown()
+        }
+    }
+
+    // stagnant frame detection — if no frame arrives for 5s while "connected", mark as no signal
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(3_000)
+            val t = lastFrameReceivedAt
+            val stagnant = t > 0 && (System.currentTimeMillis() - t) > 5_000
+            if (stagnant && !frameStagnant) {
+                frameStagnant = true
+                frameBitmap   = null
+                if (connectionLabel == "Live" || connectionLabel == "Connected") {
+                    connectionLabel = "No Signal"
+                }
+            }
         }
     }
 
@@ -844,7 +1001,7 @@ fun CameraTab() {
                     // priority 1: stop signal — do not cross
                     if (confirmedStop) {
                         triggerDetection("stop_signal",
-                            "Stop — Do not cross. Wait for the walk signal.", "warning",
+                            "Stop. Do not cross. Wait for the walk signal.", "warning",
                             "Stop. Do not cross.", urgent = true, cooldownMs = 8_000L,
                             tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
                             setLabel = { detectionLabel = it },
@@ -855,7 +1012,7 @@ fun CameraTab() {
                     // priority 2: walk signal — safe to cross
                     if (confirmedWalk && !confirmedStop) {
                         triggerDetection("walk_signal",
-                            "Walk sign is on — Safe to cross", "safe",
+                            "Walk sign is on. Safe to cross.", "safe",
                             "Walk sign is on. Safe to cross.", urgent = true, cooldownMs = 8_000L,
                             tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
                             setLabel = { detectionLabel = it },
@@ -866,7 +1023,7 @@ fun CameraTab() {
                     // priority 3: crosswalk with no signal present
                     if (0 in detectedClasses && !confirmedWalk && !confirmedStop) {
                         triggerDetection("crosswalk",
-                            "Crosswalk detected — Cross slowly and check both ways", "caution",
+                            "Crosswalk detected. Cross slowly, check both ways.", "caution",
                             "Crosswalk ahead. Check traffic both ways.",
                             urgent = false, cooldownMs = 12_000L,
                             tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
@@ -890,7 +1047,7 @@ fun CameraTab() {
                     // priority 5: school crossing sign
                     if (4 in detectedClasses) {
                         triggerDetection("school_sign",
-                            "School crossing zone — Reduced speed area", "info",
+                            "School crossing zone. Reduced speed area.", "info",
                             "School crossing zone ahead.",
                             urgent = false, cooldownMs = 15_000L,
                             tts = ttsInstance, ttsReady = ttsReady, lastSpokenAt = lastSpokenAt,
@@ -905,7 +1062,7 @@ fun CameraTab() {
         }
     }
 
-    // ── UI ───────────────────────────────────────────────────────────────────
+    // Camera UI
     Column(
         Modifier
             .fillMaxSize()
@@ -928,7 +1085,14 @@ fun CameraTab() {
                 Box(
                     Modifier
                         .size(8.dp)
-                        .background(if (streaming) GreenOk else RedAlert, CircleShape)
+                        .background(
+                            when {
+                                frameStagnant -> YellowWarn
+                                streaming     -> GreenOk
+                                else          -> RedAlert
+                            },
+                            CircleShape
+                        )
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
@@ -936,9 +1100,10 @@ fun CameraTab() {
                     fontSize     = 13.sp,
                     fontWeight   = FontWeight.SemiBold,
                     color        = when {
-                        streaming                            -> GreenOk
+                        connectionLabel == "Live"           -> GreenOk
                         connectionLabel == "Reconnecting..." -> YellowWarn
-                        else                                 -> TextMuted
+                        connectionLabel == "No Signal"      -> YellowWarn
+                        else                                -> TextMuted
                     }
                 )
                 Spacer(Modifier.weight(1f))
@@ -994,6 +1159,7 @@ fun CameraTab() {
                             when (connectionLabel) {
                                 "Reconnecting..." -> "Reconnecting..."
                                 "Offline"         -> "Camera Offline"
+                                "No Signal"       -> "Camera Not Transmitting"
                                 else              -> "No Live Feed"
                             },
                             fontSize   = 16.sp,
@@ -1005,6 +1171,7 @@ fun CameraTab() {
                             when (connectionLabel) {
                                 "Reconnecting..." -> "Attempting to reconnect..."
                                 "Offline"         -> "Pi camera is not streaming"
+                                "No Signal"       -> "Connected but no frames received"
                                 else              -> "Waiting for stream..."
                             },
                             fontSize = 12.sp,
@@ -1026,8 +1193,8 @@ fun CameraTab() {
             else                       -> Triple(PanelPurple, CardBorder, Icons.Default.Visibility)
         }
         val panelText = when {
-            isBlocked              -> "Camera view blocked — Please clear the lens"
-            isBlurry               -> "Image blurry — Please clean the camera lens"
+            isBlocked              -> "Camera view blocked. Please clear the lens."
+            isBlurry               -> "Image blurry. Please clean the camera lens."
             detectionLabel != null -> detectionLabel!!
             else                   -> "No pedestrian alerts detected"
         }
@@ -1120,7 +1287,7 @@ fun CameraTab() {
             }
             Spacer(Modifier.height(2.dp))
             Text(
-                "Assistive tool only — always verify safety yourself",
+                "Assistive tool only. Always verify safety yourself.",
                 fontSize = 10.sp,
                 color    = TextMuted.copy(alpha = 0.45f)
             )

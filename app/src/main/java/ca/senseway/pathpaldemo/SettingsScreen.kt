@@ -20,10 +20,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
 
 @Composable
 fun SettingsScreen(viewModel: AppViewModel, onLogout: () -> Unit) {
@@ -53,19 +56,24 @@ fun SettingsScreen(viewModel: AppViewModel, onLogout: () -> Unit) {
                 Modifier.padding(18.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val avatarBmp = viewModel.avatarBitmap
                 Box(
                     Modifier
                         .size(54.dp)
-                        .background(
-                            Brush.linearGradient(listOf(ElectricBlue, VioletAccent)),
-                            CircleShape
-                        ),
+                        .clip(CircleShape)
+                        .background(Brush.linearGradient(listOf(ElectricBlue, VioletAccent))),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        viewModel.displayInitial,
-                        fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White
-                    )
+                    if (avatarBmp != null) {
+                        Image(
+                            bitmap = avatarBmp.asImageBitmap(),
+                            contentDescription = "Avatar",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Text(viewModel.displayInitial, fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White)
+                    }
                 }
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
@@ -99,6 +107,11 @@ fun SettingsScreen(viewModel: AppViewModel, onLogout: () -> Unit) {
             HorizontalDivider(Modifier.padding(start = 52.dp), color = CardBorder, thickness = 0.5.dp)
             SettingsRow(Icons.Default.Code, "API Endpoint", "api.senseway.ca", TextMuted)
         }
+
+        Spacer(Modifier.height(16.dp))
+
+        // Bluetooth section
+        BluetoothSettingsSection(viewModel)
 
         Spacer(Modifier.height(16.dp))
 
@@ -152,6 +165,123 @@ fun SettingsScreen(viewModel: AppViewModel, onLogout: () -> Unit) {
         }
 
         Spacer(Modifier.height(100.dp))
+    }
+}
+
+@Composable
+fun BluetoothSettingsSection(viewModel: AppViewModel) {
+    val statusColor = when (viewModel.btStatus) {
+        "Connected"    -> GreenOk
+        "Connecting..."-> YellowWarn
+        "Failed", "Bluetooth Off" -> RedAlert
+        else           -> TextMuted
+    }
+    var macInput by remember { mutableStateOf(viewModel.btMacAddress) }
+
+    Column(Modifier.padding(horizontal = 16.dp)) {
+        Text(
+            "BLUETOOTH",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = TextMuted,
+            letterSpacing = 1.sp,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
+        )
+        Surface(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = PanelPurple,
+            border = BorderStroke(1.dp, CardBorder)
+        ) {
+            Column {
+                // status row
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier
+                            .size(34.dp)
+                            .background(statusColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Bluetooth, null, tint = statusColor, modifier = Modifier.size(18.dp))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("PathPal Pi", fontSize = 14.sp, color = TextWhite)
+                        Text(viewModel.btStatus, fontSize = 12.sp, color = statusColor, fontWeight = FontWeight.SemiBold)
+                    }
+                    Box(Modifier.size(8.dp).background(statusColor, CircleShape))
+                }
+
+                HorizontalDivider(Modifier.padding(start = 52.dp), color = CardBorder, thickness = 0.5.dp)
+
+                // mac address input
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    Text("Device MAC Address", fontSize = 12.sp, color = TextMuted, modifier = Modifier.padding(bottom = 6.dp))
+                    OutlinedTextField(
+                        value = macInput,
+                        onValueChange = { macInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text("XX:XX:XX:XX:XX:XX", color = TextMuted, fontSize = 13.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor   = ElectricBlue,
+                            unfocusedBorderColor = CardBorder,
+                            focusedTextColor     = TextWhite,
+                            unfocusedTextColor   = TextGray,
+                            cursorColor          = ElectricBlue
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp)
+                    )
+                }
+
+                HorizontalDivider(Modifier.padding(start = 52.dp), color = CardBorder, thickness = 0.5.dp)
+
+                // connect / disconnect buttons
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val connected = viewModel.btStatus == "Connected"
+                    Button(
+                        onClick = {
+                            viewModel.saveBtMac(macInput.trim())
+                            viewModel.connectBluetooth()
+                        },
+                        enabled = !connected,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = ElectricBlue,
+                            disabledContainerColor = ElectricBlue.copy(alpha = 0.3f)
+                        )
+                    ) {
+                        Icon(Icons.Default.BluetoothSearching, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Connect", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.disconnectBluetooth() },
+                        enabled = connected,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, if (connected) RedAlert.copy(alpha = 0.5f) else CardBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = if (connected) RedAlert else TextMuted)
+                    ) {
+                        Icon(Icons.Default.BluetoothDisabled, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Disconnect", fontSize = 13.sp)
+                    }
+                }
+            }
+        }
     }
 }
 

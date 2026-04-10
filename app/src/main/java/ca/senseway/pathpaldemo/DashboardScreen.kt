@@ -121,7 +121,7 @@ fun weatherDescription(code: Int): String = when {
     code in 80..82     -> "Rain showers"
     code in 85..86     -> "Snow showers"
     code in 95..99     -> "Thunderstorm"
-    else               -> "—"
+    else               -> "Unknown"
 }
 
 fun weatherIcon(code: Int): ImageVector = when {
@@ -1095,7 +1095,7 @@ fun GpsAcquiringScreen() {
             Spacer(Modifier.height(28.dp))
             Text("Acquiring GPS signal", color = TextWhite, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            Text("Connecting to Senseway network…", color = TextMuted, fontSize = 13.sp)
+            Text("Waiting for location permission or GPS fix", color = TextMuted, fontSize = 13.sp)
         }
     }
 }

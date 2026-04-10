@@ -1,7 +1,16 @@
 package ca.senseway.pathpaldemo
 
+import android.annotation.SuppressLint
 import android.app.Application
+import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Looper
+import android.util.Base64
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -9,9 +18,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.*
 
 // Notification types
@@ -69,11 +80,34 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val userId: String
         get() = currentUser?.user_id?.takeIf { it.isNotBlank() } ?: resolvedUserId
 
-    // Device sensor data (polled from Senseway API every 3 s)
-    var battery   by mutableStateOf(0);    private set
-    var heartRate by mutableStateOf(0);    private set
-    var latitude  by mutableStateOf(0.0);  private set
-    var longitude by mutableStateOf(0.0);  private set
+    // device data — battery hardcoded to 75 for now, rest from bluetooth
+    var battery        by mutableStateOf(75);   private set
+    var heartRate      by mutableStateOf(0);    private set
+    var latitude       by mutableStateOf(0.0);  private set
+    var longitude      by mutableStateOf(0.0);  private set
+    var lidarDistance  by mutableStateOf(0.0);  private set
+    var accelerometerX by mutableStateOf(0.0);  private set
+    var accelerometerY by mutableStateOf(0.0);  private set
+    var accelerometerZ by mutableStateOf(0.0);  private set
+    var gyroX          by mutableStateOf(0.0);  private set
+    var gyroY          by mutableStateOf(0.0);  private set
+    var gyroZ          by mutableStateOf(0.0);  private set
+
+    // bluetooth
+    var btStatus by mutableStateOf("Disconnected"); private set
+    private val btAdapter = (app.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    private val btService = BluetoothService(btAdapter)
+
+    // decoded avatar bitmap — populated from base64 data URIs or regular URLs
+    var avatarBitmap by mutableStateOf<Bitmap?>(null); private set
+
+    val btMacAddress: String
+        get() = prefs.getString("bt_mac", "B8:27:EB:7D:E7:FE") ?: "B8:27:EB:7D:E7:FE"
+
+    fun saveBtMac(mac: String) { prefs.edit().putString("bt_mac", mac).apply() }
+
+    fun connectBluetooth()    { btService.connect(btMacAddress) }
+    fun disconnectBluetooth() { btService.disconnect() }
 
     // Weather (polled from Open-Meteo on first GPS fix, then every 10 min)
     var temperature         by mutableStateOf(Double.NaN);  private set
@@ -114,10 +148,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val notifications = mutableStateListOf<AppNotification>()
 
     // Coroutine jobs
-    private var pollingJob:  Job? = null
-    private var weatherJob:  Job? = null
-    private var geofenceJob: Job? = null
-    private var eventJob:    Job? = null
+    private var pollingJob:     Job? = null
+    private var weatherJob:     Job? = null
+    private var geofenceJob:    Job? = null
+    private var eventJob:       Job? = null
+    private var locationPushJob: Job? = null
+    private var profileRefreshJob: Job? = null
+
+    // Phone GPS
+    private var locationMgr:      LocationManager?  = null
+    private var locationListener: LocationListener? = null
 
     private var lastWeatherLat = Double.NaN
     private var lastWeatherLon = Double.NaN
@@ -134,8 +174,41 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         NotificationHelper.createChannels(app)
-        // Restore admin sessions across restarts (admin uses local auth, no cookie needed).
-        // Real-API sessions use in-memory cookies that don't survive process death.
+
+        // bluetooth status + data collection — always running
+        viewModelScope.launch {
+            btService.status.collect { s ->
+                btStatus = s
+                if (s == "Connected") {
+                    notifications.add(0, AppNotification(
+                        title   = "PathPal Device Connected",
+                        message = "Bluetooth sensor data is now streaming.",
+                        type    = NotifType.SUCCESS
+                    ))
+                    NotificationHelper.postEvent(app, "Device Connected", "Bluetooth link established", 99_998)
+                } else if (s == "Disconnected" && isLoggedIn) {
+                    notifications.add(0, AppNotification(
+                        title   = "Device Disconnected",
+                        message = "Bluetooth link lost. Reconnect in Settings.",
+                        type    = NotifType.INFO
+                    ))
+                }
+            }
+        }
+        viewModelScope.launch {
+            btService.data.collect { d ->
+                if (d.bpm > 0)   heartRate      = d.bpm
+                lidarDistance  = d.dist_cm
+                accelerometerX = d.accel.getOrElse(0) { 0.0 }
+                accelerometerY = d.accel.getOrElse(1) { 0.0 }
+                accelerometerZ = d.accel.getOrElse(2) { 0.0 }
+                gyroX          = d.gyro.getOrElse(0)  { 0.0 }
+                gyroY          = d.gyro.getOrElse(1)  { 0.0 }
+                gyroZ          = d.gyro.getOrElse(2)  { 0.0 }
+            }
+        }
+
+        // restore admin sessions across restarts
         if (prefs.getBoolean("logged_in", false)) {
             if (prefs.getBoolean("is_admin", false)) {
                 isLoggedIn = true
@@ -143,6 +216,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 startWeatherPolling()
                 startGeofencePolling()
                 startEventPolling()
+                startProfileRefresh()
             } else {
                 prefs.edit().remove("logged_in").apply()
             }
@@ -194,6 +268,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     startWeatherPolling()
                     startGeofencePolling()
                     startEventPolling()
+                    startProfileRefresh()
                 } else {
                     loginError = if (response.code() in 401..403)
                         "Invalid email or password"
@@ -230,10 +305,70 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             .remove("is_admin")
             .remove("stored_user_id")
             .apply()
-        pollingJob?.cancel();  pollingJob  = null
-        weatherJob?.cancel();  weatherJob  = null
-        geofenceJob?.cancel(); geofenceJob = null
-        eventJob?.cancel();    eventJob    = null
+        pollingJob?.cancel();         pollingJob         = null
+        weatherJob?.cancel();         weatherJob         = null
+        geofenceJob?.cancel();        geofenceJob        = null
+        eventJob?.cancel();           eventJob           = null
+        locationPushJob?.cancel();    locationPushJob    = null
+        profileRefreshJob?.cancel();  profileRefreshJob  = null
+        stopGpsTracking()
+        btService.disconnect()
+        avatarBitmap = null
+    }
+
+    private fun startProfileRefresh() {
+        profileRefreshJob?.cancel()
+        profileRefreshJob = viewModelScope.launch {
+            while (isLoggedIn) {
+                fetchFullProfile()
+                delay(5 * 60 * 1_000L) // re-check every 5 minutes
+            }
+        }
+    }
+
+    private suspend fun fetchFullProfile() {
+        try {
+            val resp = SenseWayClient.api.getUser(userId)
+            if (resp.isSuccessful) {
+                val full = resp.body() ?: return
+                // only re-decode avatar if the URL actually changed
+                if (full.avatar_url != currentUser?.avatar_url) {
+                    decodeAvatar(full.avatar_url)
+                }
+                currentUser = full
+            }
+        } catch (e: Exception) {
+            Log.e("AuthVM", "fetchFullProfile: ${e.message}")
+        }
+    }
+
+    private fun decodeAvatar(url: String?) {
+        if (url.isNullOrBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val bmp: Bitmap? = when {
+                    // base64 data URI — Coil can't handle these, decode manually
+                    url.startsWith("data:") -> {
+                        val base64 = url.substringAfter(",")
+                        val bytes  = Base64.decode(base64, Base64.DEFAULT)
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    }
+                    // regular https URL — fetch with OkHttp and decode
+                    url.startsWith("http") -> {
+                        val req  = okhttp3.Request.Builder().url(url).build()
+                        sensewayHttpClient.newCall(req).execute().use { resp ->
+                            resp.body?.bytes()?.let { b ->
+                                BitmapFactory.decodeByteArray(b, 0, b.size)
+                            }
+                        }
+                    }
+                    else -> null
+                }
+                withContext(Dispatchers.Main) { avatarBitmap = bmp }
+            } catch (e: Exception) {
+                Log.e("AuthVM", "decodeAvatar failed: ${e.message}")
+            }
+        }
     }
 
     fun toggleGeofenceVisibility() {
@@ -242,6 +377,90 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissNotification(id: Long) {
         notifications.removeIf { it.id == id }
+    }
+
+    fun onLocationPermissionResult(ctx: Context, granted: Boolean) {
+        if (granted && isLoggedIn) startGpsTracking(ctx)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startGpsTracking(ctx: Context) {
+        val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        locationMgr = lm
+        locationListener?.let { runCatching { lm.removeUpdates(it) } }
+
+        val listener = LocationListener { loc -> handlePhoneLocation(loc) }
+        locationListener = listener
+
+        listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { provider ->
+            runCatching {
+                if (lm.isProviderEnabled(provider)) {
+                    lm.requestLocationUpdates(provider, 5_000L, 0f, listener, Looper.getMainLooper())
+                }
+            }
+        }
+
+        // Use last-known fix immediately so map/weather don't wait for first update
+        listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).firstOrNull { provider ->
+            runCatching { lm.getLastKnownLocation(provider)?.let { handlePhoneLocation(it); true } ?: false }
+                .getOrDefault(false)
+        }
+
+        startLocationPush()
+    }
+
+    private fun handlePhoneLocation(loc: Location) {
+        val newLat = loc.latitude
+        val newLon = loc.longitude
+        if (newLat == 0.0 && newLon == 0.0) return
+
+        latitude  = newLat
+        longitude = newLon
+
+        if (!hadFirstGpsFix) {
+            hadFirstGpsFix = true
+            lastWeatherLat = newLat
+            lastWeatherLon = newLon
+            viewModelScope.launch { fetchWeather(newLat, newLon) }
+            viewModelScope.launch { fetchAirQuality(newLat, newLon) }
+        } else {
+            val moved = abs(newLat - lastWeatherLat) > 0.01 || abs(newLon - lastWeatherLon) > 0.01
+            if (moved) {
+                lastWeatherLat = newLat
+                lastWeatherLon = newLon
+                viewModelScope.launch { fetchWeather(newLat, newLon) }
+            }
+        }
+        checkGeofenceTransitions()
+    }
+
+    private fun startLocationPush() {
+        locationPushJob?.cancel()
+        locationPushJob = viewModelScope.launch {
+            while (isLoggedIn) {
+                val hasHr  = heartRate > 0
+                val hasLoc = latitude != 0.0 && longitude != 0.0
+                if (hasHr || hasLoc) {
+                    try {
+                        SenseWayClient.api.updateStatus(
+                            StatusUpdateRequest(
+                                userId, latitude, longitude,
+                                heartRate.takeIf { hasHr }
+                            )
+                        )
+                    } catch (e: Exception) {
+                        Log.e("Status", "push failed", e)
+                    }
+                }
+                delay(3_000)
+            }
+        }
+    }
+
+    private fun stopGpsTracking() {
+        locationListener?.let { locationMgr?.runCatching { removeUpdates(it) } }
+        locationListener = null
+        locationMgr = null
     }
 
     // Device polling (every 3 s)
@@ -254,29 +473,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     val response = SenseWayClient.api.getStatus(userId)
                     if (response.isSuccessful) {
                         response.body()?.let { s ->
-                            battery   = s.battery   ?: 0
-                            heartRate = s.heart_rate ?: 0
-                            s.latitude?.let  { v -> latitude  = v }
-                            s.longitude?.let { v -> longitude = v }
-
-                            if (latitude != 0.0 && longitude != 0.0) {
-                                if (!hadFirstGpsFix) {
-                                    hadFirstGpsFix = true
-                                    lastWeatherLat = latitude
-                                    lastWeatherLon = longitude
-                                    viewModelScope.launch { fetchWeather(latitude, longitude) }
-                                    viewModelScope.launch { fetchAirQuality(latitude, longitude) }
-                                } else {
-                                    val moved = abs(latitude  - lastWeatherLat) > 0.01 ||
-                                                abs(longitude - lastWeatherLon) > 0.01
-                                    if (moved) {
-                                        lastWeatherLat = latitude
-                                        lastWeatherLon = longitude
-                                        viewModelScope.launch { fetchWeather(latitude, longitude) }
-                                    }
-                                }
-                                checkGeofenceTransitions()
-                            }
+                            // battery hardcoded to 75 for now — comment back in when API is stable
+                            // battery = s.battery ?: 75
                         }
                     }
                 } catch (e: Exception) {
@@ -547,27 +745,27 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // Pavement safety (highest priority, always first)
         when {
             weatherCode in 95..99 -> alerts += WeatherAlert(
-                "Pavement Safety", "Seek shelter — Thunderstorm",
+                "Pavement Safety", "Seek shelter (Thunderstorm)",
                 "Active thunderstorm. Avoid all outdoor activity immediately.",
                 AlertSeverity.UNSAFE
             )
             weatherCode in 71..77 || weatherCode in 85..86 -> alerts += WeatherAlert(
-                "Pavement Safety", "Slippery — Snow on ground",
+                "Pavement Safety", "Slippery: Snow on ground",
                 "Snow or sleet detected. High fall risk on all paved surfaces.",
                 AlertSeverity.UNSAFE
             )
             (weatherCode in 61..67 || weatherCode in 80..82) && precipitation > 1.0 -> alerts += WeatherAlert(
-                "Pavement Safety", "Slippery — Heavy rain",
+                "Pavement Safety", "Slippery: Heavy rain",
                 "Heavy rainfall. Pavement is very wet and slippery.",
                 AlertSeverity.UNSAFE
             )
             weatherCode in 51..67 || weatherCode in 80..82 || precipitation > 0.05 -> alerts += WeatherAlert(
-                "Pavement Safety", "Wet pavement — Caution",
+                "Pavement Safety", "Wet pavement, use caution",
                 "Rainfall detected. Pavement may be slippery; slow down.",
                 AlertSeverity.CAUTION
             )
             icy -> alerts += WeatherAlert(
-                "Pavement Safety", "Possible ice — Caution",
+                "Pavement Safety", "Possible ice, use caution",
                 "Near-freezing with high humidity. Black ice may form on surfaces.",
                 AlertSeverity.CAUTION
             )
@@ -581,12 +779,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // Wind
         if (!windSpeed.isNaN()) when {
             windSpeed > 60 -> alerts += WeatherAlert(
-                "Wind", "Dangerous winds — ${windSpeed.toInt()} km/h",
+                "Wind", "Dangerous winds: ${windSpeed.toInt()} km/h",
                 "Severe wind gusts. Stay indoors and away from windows.",
                 AlertSeverity.UNSAFE
             )
             windSpeed > 35 -> alerts += WeatherAlert(
-                "Wind", "Strong winds — ${windSpeed.toInt()} km/h",
+                "Wind", "Strong winds: ${windSpeed.toInt()} km/h",
                 "Grip handrails and secure loose items outdoors.",
                 AlertSeverity.CAUTION
             )
@@ -596,22 +794,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // Temperature
         if (tempSafe) when {
             temperature < -15 -> alerts += WeatherAlert(
-                "Temperature", "Extreme cold — ${temperature.toInt()}°C",
+                "Temperature", "Extreme cold: ${temperature.toInt()}°C",
                 "Frostbite risk within minutes of exposure. Stay indoors.",
                 AlertSeverity.UNSAFE
             )
             temperature < 0 -> alerts += WeatherAlert(
-                "Temperature", "Below freezing — ${temperature.toInt()}°C",
+                "Temperature", "Below freezing: ${temperature.toInt()}°C",
                 "Wear warm layers, cover extremities, and watch for ice.",
                 AlertSeverity.CAUTION
             )
             temperature > 38 -> alerts += WeatherAlert(
-                "Temperature", "Extreme heat — ${temperature.toInt()}°C",
+                "Temperature", "Extreme heat: ${temperature.toInt()}°C",
                 "Heat exhaustion risk. Hydrate frequently and seek shade.",
                 AlertSeverity.UNSAFE
             )
             temperature > 32 -> alerts += WeatherAlert(
-                "Temperature", "High heat — ${temperature.toInt()}°C",
+                "Temperature", "High heat: ${temperature.toInt()}°C",
                 "Avoid prolonged sun exposure and wear light clothing.",
                 AlertSeverity.CAUTION
             )
@@ -629,22 +827,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val aqi = airQualityIndex
         if (aqi >= 0) when {
             aqi > 150 -> alerts += WeatherAlert(
-                "Air Quality", "Very poor air — AQI $aqi",
+                "Air Quality", "Very poor air (AQI $aqi)",
                 "Limit all outdoor activity. Sensitive groups must stay inside.",
                 AlertSeverity.UNSAFE
             )
             aqi > 100 -> alerts += WeatherAlert(
-                "Air Quality", "Poor air quality — AQI $aqi",
+                "Air Quality", "Poor air quality (AQI $aqi)",
                 "Reduce outdoor exertion. Sensitive individuals avoid exposure.",
                 AlertSeverity.CAUTION
             )
             aqi > 50 -> alerts += WeatherAlert(
-                "Air Quality", "Moderate air quality — AQI $aqi",
+                "Air Quality", "Moderate air quality (AQI $aqi)",
                 "Acceptable for most. Unusually sensitive people should take care.",
                 AlertSeverity.CAUTION
             )
             else -> alerts += WeatherAlert(
-                "Air Quality", "Good air quality — AQI $aqi",
+                "Air Quality", "Good air quality (AQI $aqi)",
                 "Air quality is satisfactory for all activities.",
                 AlertSeverity.SAFE
             )
@@ -654,22 +852,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val uv = uvIndex
         if (!uv.isNaN()) when {
             uv >= 8 -> alerts += WeatherAlert(
-                "UV Index", "Very high UV — ${"%.1f".format(uv)}",
+                "UV Index", "Very high UV (${"%.1f".format(uv)})",
                 "UV is very high. Use SPF 50+, protective clothing and hat.",
                 AlertSeverity.UNSAFE
             )
             uv >= 6 -> alerts += WeatherAlert(
-                "UV Index", "High UV — ${"%.1f".format(uv)}",
+                "UV Index", "High UV (${"%.1f".format(uv)})",
                 "Seek shade at midday. Apply broad-spectrum sunscreen.",
                 AlertSeverity.CAUTION
             )
             uv >= 3 -> alerts += WeatherAlert(
-                "UV Index", "Moderate UV — ${"%.1f".format(uv)}",
+                "UV Index", "Moderate UV (${"%.1f".format(uv)})",
                 "Sun protection recommended during peak hours (10 am–4 pm).",
                 AlertSeverity.CAUTION
             )
             else -> alerts += WeatherAlert(
-                "UV Index", "Low UV — ${"%.1f".format(uv)}",
+                "UV Index", "Low UV (${"%.1f".format(uv)})",
                 "Minimal sun protection needed for most outdoor activities.",
                 AlertSeverity.SAFE
             )

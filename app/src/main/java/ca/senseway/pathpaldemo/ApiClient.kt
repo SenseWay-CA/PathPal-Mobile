@@ -70,6 +70,13 @@ data class StatusDto(
     val created_at: String?
 )
 
+data class StatusUpdateRequest(
+    val user_id:    String,
+    val latitude:   Double,
+    val longitude:  Double,
+    val heart_rate: Int? = null
+)
+
 data class GeofenceDto(
     val id:          Int?,
     val user_id:     String?,
@@ -120,9 +127,12 @@ interface SenseWayApi {
     @GET("user")
     suspend fun getUser(@Query("user_id") userId: String): Response<UserDto>
 
-    // Device status (read-only, polled every 3 s)
+    // Device status
     @GET("status")
     suspend fun getStatus(@Query("user_id") userId: String): Response<StatusDto>
+
+    @POST("status")
+    suspend fun updateStatus(@Body body: StatusUpdateRequest): Response<StatusDto>
 
     // Events (read-only)
     @GET("events")
