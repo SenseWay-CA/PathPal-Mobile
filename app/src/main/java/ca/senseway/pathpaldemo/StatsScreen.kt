@@ -990,13 +990,24 @@ fun CameraTab() {
         }
     }
 
-    // ml inference — both models run every 3rd frame for fast detection
+    // ml inference — staggered: pathsense on even frames, walksignal on odd frames
+    // never both at once — keeps peak CPU load constant instead of spiking every 3rd frame
     LaunchedEffect(frameBitmap) {
         val bmp = frameBitmap ?: return@LaunchedEffect
         frameCounter++
-        val runPathsense  = frameCounter % 3 == 0
-        val runWalksignal = frameCounter % 3 == 0
+        val runPathsense  = frameCounter % 2 == 0
+        val runWalksignal = frameCounter % 2 == 1
         if (!runPathsense && !runWalksignal) return@LaunchedEffect
+
+        // skip inference entirely on bad frames — blurry/blocked pixels produce garbage detections
+        if (isBlurry || isBlocked) {
+            withContext(Dispatchers.Main) {
+                consecutiveWalk = maxOf(consecutiveWalk - 1, 0)
+                consecWsWalk    = maxOf(consecWsWalk - 1, 0)
+                consecWsWait    = maxOf(consecWsWait - 1, 0)
+            }
+            return@LaunchedEffect
+        }
 
         withContext(Dispatchers.Default) {
             try {
@@ -1019,14 +1030,19 @@ fun CameraTab() {
                         (box.x2 - box.x1) > bmp.width  * 0.04f &&
                         (box.y2 - box.y1) > bmp.height * 0.04f
                     }
+                    val topScore = boxes.maxOfOrNull { it.score } ?: 0f
                     val crosswalkHit = boxes.isNotEmpty()
 
                     withContext(Dispatchers.Main) {
                         pathsenseBoxes = boxes
 
-                        // soft-decay counter for crosswalk confirmation
-                        if (crosswalkHit) consecutiveWalk = minOf(consecutiveWalk + 1, 10)
-                        else              consecutiveWalk = maxOf(consecutiveWalk - 1, 0)
+                        // confidence-weighted: high confidence hits confirm faster
+                        if (crosswalkHit) {
+                            val inc = if (topScore >= 0.70f) 2 else 1
+                            consecutiveWalk = minOf(consecutiveWalk + inc, 10)
+                        } else {
+                            consecutiveWalk = maxOf(consecutiveWalk - 1, 0)
+                        }
 
                         if (consecutiveWalk >= 4) {
                             triggerDetection("crosswalk",
@@ -1053,18 +1069,22 @@ fun CameraTab() {
                                     confidenceThreshold = 0.55f
                                 )
                         }
-                    val wsBoxesRaw = wsDetectorRef[0]!!.detect(bmp)
+                    val wsDetector = wsDetectorRef[0] ?: return@withContext
+                    val wsBoxesRaw = wsDetector.detect(bmp)
                     val wsBoxes = wsBoxesRaw.filter { box ->
                         (box.x2 - box.x1) > bmp.width  * 0.04f &&
                         (box.y2 - box.y1) > bmp.height * 0.04f
                     }
-                    val wsWalkHit = wsBoxes.any { it.label == "walk" }
-                    val wsWaitHit = wsBoxes.any { it.label == "wait" }
+                    val wsWalkScore = wsBoxes.filter { it.label == "walk" }.maxOfOrNull { it.score } ?: 0f
+                    val wsWaitScore = wsBoxes.filter { it.label == "wait" }.maxOfOrNull { it.score } ?: 0f
+                    val wsWalkHit  = wsWalkScore > 0f
+                    val wsWaitHit  = wsWaitScore > 0f
 
                     withContext(Dispatchers.Main) {
-                        if (wsWalkHit) consecWsWalk = minOf(consecWsWalk + 1, 10)
+                        // confidence-weighted: 75%+ confidence counts double
+                        if (wsWalkHit) consecWsWalk = minOf(consecWsWalk + if (wsWalkScore >= 0.75f) 2 else 1, 10)
                         else           consecWsWalk = maxOf(consecWsWalk - 1, 0)
-                        if (wsWaitHit) consecWsWait = minOf(consecWsWait + 1, 10)
+                        if (wsWaitHit) consecWsWait = minOf(consecWsWait + if (wsWaitScore >= 0.75f) 2 else 1, 10)
                         else           consecWsWait = maxOf(consecWsWait - 1, 0)
                         walkBoxes = wsBoxes
 
