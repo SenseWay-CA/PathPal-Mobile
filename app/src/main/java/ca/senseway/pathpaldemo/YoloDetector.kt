@@ -20,11 +20,14 @@ class YoloDetector(
     private var interpreter: Interpreter? = null
     private var inputImageWidth  = 640
     private var inputImageHeight = 640
-    private val iouThreshold = 0.50f
+    private val iouThreshold = 0.45f   // tighter NMS — removes more overlapping duplicates
 
     init {
         val model = FileUtil.loadMappedFile(context, modelPath)
-        val options = Interpreter.Options().apply { setNumThreads(4) }
+        val options = Interpreter.Options().apply {
+            setNumThreads(4)
+            // GPU delegate would help but requires extra dep — CPU with 4 threads is solid
+        }
         interpreter = Interpreter(model, options)
 
         val inputShape = interpreter!!.getInputTensor(0).shape()
@@ -68,10 +71,14 @@ class YoloDetector(
             val w  = data[(2 * numAnchors) + i]
             val h  = data[(3 * numAnchors) + i]
 
-            val x1 = (cx - w / 2f) * bitmap.width
-            val y1 = (cy - h / 2f) * bitmap.height
-            val x2 = (cx + w / 2f) * bitmap.width
-            val y2 = (cy + h / 2f) * bitmap.height
+            // clamp to bitmap bounds
+            val x1 = ((cx - w / 2f) * bitmap.width).coerceIn(0f, bitmap.width.toFloat())
+            val y1 = ((cy - h / 2f) * bitmap.height).coerceIn(0f, bitmap.height.toFloat())
+            val x2 = ((cx + w / 2f) * bitmap.width).coerceIn(0f, bitmap.width.toFloat())
+            val y2 = ((cy + h / 2f) * bitmap.height).coerceIn(0f, bitmap.height.toFloat())
+
+            // reject degenerate boxes
+            if (x2 - x1 < 4f || y2 - y1 < 4f) continue
 
             val label = labels.getOrElse(bestClassIdx) { "class_$bestClassIdx" }
             boxes.add(BoundingBox(x1, y1, x2, y2, bestScore, label, bestClassIdx))
@@ -79,14 +86,19 @@ class YoloDetector(
 
         val nmsResults = applyNms(boxes)
 
-        // zebra stripe filter — reject crosswalk detections that lack alternating white/dark bands
+        // zebra stripe filter — only for crosswalk detections, validates stripe pattern
         return nmsResults.filter { box ->
             if (box.label != "crosswalk") true
             else hasZebraStripes(bitmap, box)
         }
     }
 
-    // checks that a bounding box region contains typical zebra crossing stripe patterns
+    /**
+     * Validates that a detected box contains a real zebra crossing.
+     * Samples both horizontal AND vertical/diagonal scanlines so angled
+     * crosswalks are also accepted. A real crosswalk must show alternating
+     * bright/dark bands AND maintain a meaningful white-to-total ratio.
+     */
     private fun hasZebraStripes(bitmap: Bitmap, box: BoundingBox): Boolean {
         val x1 = box.x1.toInt().coerceIn(0, bitmap.width  - 1)
         val y1 = box.y1.toInt().coerceIn(0, bitmap.height - 1)
@@ -96,23 +108,21 @@ class YoloDetector(
         val boxH = y2 - y1
         if (boxW < 12 || boxH < 12) return false
 
-        val step = (boxW / 18).coerceAtLeast(1)
+        val hStep = (boxW / 20).coerceAtLeast(1)
+        val vStep = (boxH / 20).coerceAtLeast(1)
         var totalTransitions = 0
         var brightPixels     = 0
         var totalPixels      = 0
 
-        // sample 7 horizontal scanlines through the box
+        // ── horizontal scanlines (7 lines through the box height) ────────────
         for (si in 1..7) {
             val py = y1 + (si * boxH / 8)
             var prevBright = false
             var lineT = 0
             var first = true
-            for (px in x1 until x2 step step) {
-                val p   = bitmap.getPixel(px, py)
-                val lum = (0.299 * ((p shr 16) and 0xFF) +
-                           0.587 * ((p shr 8)  and 0xFF) +
-                           0.114 * (p          and 0xFF)).toInt()
-                val bright = lum > 130
+            for (px in x1 until x2 step hStep) {
+                val lum = luminance(bitmap.getPixel(px, py))
+                val bright = lum > 128
                 if (bright) brightPixels++
                 totalPixels++
                 if (!first && bright != prevBright) lineT++
@@ -122,12 +132,59 @@ class YoloDetector(
             totalTransitions += lineT
         }
 
-        val avgT        = totalTransitions.toDouble() / 7.0
+        // ── vertical scanlines (5 lines through the box width) ────────────
+        // catches stripes that run top-to-bottom (standard crosswalk orientation)
+        for (si in 1..5) {
+            val px = x1 + (si * boxW / 6)
+            var prevBright = false
+            var lineT = 0
+            var first = true
+            for (py in y1 until y2 step vStep) {
+                val lum = luminance(bitmap.getPixel(px, py))
+                val bright = lum > 128
+                if (bright) brightPixels++
+                totalPixels++
+                if (!first && bright != prevBright) lineT++
+                prevBright = bright
+                first = false
+            }
+            totalTransitions += lineT
+        }
+
+        // ── diagonal scanline (top-left → bottom-right) ──────────────────
+        // catches 45-degree crosswalk shots from a perspective angle
+        val diagSteps = minOf(boxW, boxH) / hStep
+        if (diagSteps > 2) {
+            var prevBright = false
+            var lineT = 0
+            var first = true
+            for (step in 0 until diagSteps) {
+                val px = (x1 + step * boxW / diagSteps).coerceIn(x1, x2)
+                val py = (y1 + step * boxH / diagSteps).coerceIn(y1, y2)
+                val lum = luminance(bitmap.getPixel(px, py))
+                val bright = lum > 128
+                if (bright) brightPixels++
+                totalPixels++
+                if (!first && bright != prevBright) lineT++
+                prevBright = bright
+                first = false
+            }
+            totalTransitions += lineT
+        }
+
+        // normalise: transitions per scanline, across all 13+ lines sampled
+        val numLines    = 13.0
+        val avgT        = totalTransitions.toDouble() / numLines
         val brightRatio = brightPixels.toDouble() / totalPixels.coerceAtLeast(1)
 
-        // must have stripe alternation and a meaningful white region
-        return avgT >= 2.5 && brightRatio in 0.12..0.82
+        // needs at least 2 stripe alternations avg AND a plausible white/dark mix
+        return avgT >= 2.0 && brightRatio in 0.10..0.85
     }
+
+    private fun luminance(pixel: Int): Int =
+        (0.299 * ((pixel shr 16) and 0xFF) +
+         0.587 * ((pixel shr 8)  and 0xFF) +
+         0.114 * (pixel          and 0xFF)).toInt()
 
     private fun applyNms(boxes: List<BoundingBox>): List<BoundingBox> {
         val sorted   = boxes.sortedByDescending { it.score }.toMutableList()
